@@ -39,17 +39,23 @@ class Logger:
         self.logger = logging.getLogger(name)
         self.logger.setLevel(getattr(logging, level.upper()))
 
+        # 存储配置用于测试验证
+        self.name = name
+        self.level = level.upper()
+        self.max_size_mb = max_size_mb
+        self.backup_count = backup_count
+        self.log_file = log_file
+
         # 避免重复添加处理器
         if not self.logger.handlers:
-            # 设置日志格式
+            # 设置日志格式(按照任务要求的格式)
             formatter = logging.Formatter(
-                '%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s',
-                datefmt='%Y-%m-%d %H:%M:%S'
+                '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
             )
 
-            # 控制台处理器
+            # 控制台处理器(支持所有配置的日志级别)
             console_handler = logging.StreamHandler()
-            console_handler.setLevel(logging.DEBUG)
+            console_handler.setLevel(getattr(logging, level.upper()))
             console_handler.setFormatter(formatter)
             self.logger.addHandler(console_handler)
 
@@ -66,7 +72,7 @@ class Logger:
                     backupCount=backup_count,
                     encoding='utf-8'
                 )
-                file_handler.setLevel(logging.DEBUG)
+                file_handler.setLevel(getattr(logging, level.upper()))
                 file_handler.setFormatter(formatter)
                 self.logger.addHandler(file_handler)
 
@@ -94,6 +100,12 @@ class Logger:
         """记录异常信息（包含堆栈跟踪）"""
         self.logger.exception(message, *args, **kwargs)
 
+    def close(self):
+        """关闭所有日志处理器"""
+        for handler in self.logger.handlers[:]:
+            handler.close()
+            self.logger.removeHandler(handler)
+
 
 # 全局日志实例
 _global_logger: Optional[Logger] = None
@@ -108,9 +120,15 @@ def get_logger() -> Logger:
     """
     global _global_logger
     if _global_logger is None:
-        # 使用默认配置
-        project_root = Path(__file__).parent.parent.parent
-        log_file = str(project_root / 'logs' / 'app.log')
+        # 使用默认配置 - 按照任务要求使用 APPDATA 路径
+        appdata = os.getenv('APPDATA')
+        if appdata:
+            log_dir = Path(appdata) / 'WindowsSearchTool' / 'logs'
+            log_file = str(log_dir / 'app.log')
+        else:
+            # 后备方案:使用项目相对路径
+            project_root = Path(__file__).parent.parent.parent
+            log_file = str(project_root / 'logs' / 'app.log')
         _global_logger = Logger(log_file=log_file)
     return _global_logger
 
