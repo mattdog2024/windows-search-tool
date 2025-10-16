@@ -4,7 +4,7 @@ status: backlog
 created: 2025-10-16T08:13:40Z
 progress: 0%
 prd: .claude/prds/Windows Search Tool.md
-github: Will be updated when synced to GitHub
+github: https://github.com/mattdog2024/windows-search-tool/issues/1
 ---
 
 # Epic: Windows Search Tool
