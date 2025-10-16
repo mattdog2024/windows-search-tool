@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(gh issue view:*)",
+      "Bash(python -m pytest:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$(cat <<''EOF''\nIssue #6: 实现 SearchEngine 核心类和基础搜索功能\n\n- 实现 SearchResult 和 SearchResponse 数据类\n- 实现 SearchEngine 类框架和初始化方法\n- 实现基础 FTS5 全文搜索功能\n- 实现精确搜索模式 (exact) 和模糊搜索模式 (fuzzy)\n- 支持分页参数 (limit/offset)\n- 支持文件类型过滤\n- 更新 src/core/__init__.py 导出\n- 编写完整的单元测试,覆盖率达到 93%\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n)\")",
+      "Bash(git commit:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

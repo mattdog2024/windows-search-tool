@@ -1168,6 +1168,72 @@ class DBManager:
             logger.error(f"获取文件类型统计失败: {e}")
             raise
 
+    def get_all_file_paths(self) -> list[str]:
+        """
+        获取所有已索引的文件路径
+
+        Returns:
+            list[str]: 文件路径列表
+
+        Example:
+            >>> paths = db.get_all_file_paths()
+            >>> print(f"已索引 {len(paths)} 个文件")
+        """
+        cursor = self.connection.cursor()
+        cursor.execute("SELECT file_path FROM documents WHERE status='active'")
+        return [row['file_path'] for row in cursor.fetchall()]
+
+    def get_file_hash(self, file_path: str) -> Optional[str]:
+        """
+        获取文件的哈希值
+
+        Args:
+            file_path: 文件路径
+
+        Returns:
+            Optional[str]: 文件哈希值,如果文件不存在则返回None
+
+        Example:
+            >>> hash_value = db.get_file_hash("/path/to/file.txt")
+            >>> if hash_value:
+            ...     print(f"文件哈希: {hash_value}")
+        """
+        cursor = self.connection.cursor()
+        cursor.execute(
+            "SELECT content_hash FROM documents WHERE file_path = ? AND status='active'",
+            (file_path,)
+        )
+        row = cursor.fetchone()
+        return row['content_hash'] if row else None
+
+    def delete_document_by_path(
+        self,
+        file_path: str,
+        hard_delete: bool = False
+    ) -> bool:
+        """
+        根据文件路径删除文档
+
+        Args:
+            file_path: 文件路径
+            hard_delete: True 为硬删除,False 为软删除
+
+        Returns:
+            bool: 删除成功返回True,文档不存在返回False
+
+        Example:
+            >>> success = db.delete_document_by_path("/path/to/file.txt")
+        """
+        cursor = self.connection.cursor()
+        cursor.execute("SELECT id FROM documents WHERE file_path = ?", (file_path,))
+        row = cursor.fetchone()
+
+        if not row:
+            logger.warning(f"文档不存在: {file_path}")
+            return False
+
+        return self.delete_document(row['id'], hard_delete=hard_delete)
+
     def close(self) -> None:
         """
         关闭数据库连接

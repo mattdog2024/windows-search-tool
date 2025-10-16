@@ -22,6 +22,10 @@ class TestIndexManagerScan(unittest.TestCase):
         # 创建临时测试目录
         self.test_dir = tempfile.mkdtemp()
 
+        # 重置单例以获取干净的实例
+        IndexManager._instance = None
+        IndexManager._initialized = False
+
         # 初始化 IndexManager
         self.manager = IndexManager(db_path=self.temp_db.name)
 
@@ -241,7 +245,8 @@ class TestIndexManagerScan(unittest.TestCase):
 
     def test_scan_ignores_empty_files(self):
         """测试忽略空文件"""
-        # 注册解析器
+        # 注册解析器 - 确保清空之前的注册
+        self.manager.parser_factory.clear()
         from src.parsers.text_parser import TextParser
         self.manager.parser_factory.register_parser(
             'text',
@@ -288,7 +293,8 @@ class TestIndexManagerScan(unittest.TestCase):
 
     def test_list_files_multiple_directories(self):
         """测试扫描多个目录"""
-        # 注册解析器
+        # 注册解析器 - 确保清空之前的注册
+        self.manager.parser_factory.clear()
         from src.parsers.text_parser import TextParser
         self.manager.parser_factory.register_parser(
             'text',
@@ -303,7 +309,7 @@ class TestIndexManagerScan(unittest.TestCase):
             # 在两个目录中创建文件
             self._create_test_file('file1.txt', 'Dir1')
             file2_path = os.path.join(test_dir2, 'file2.txt')
-            with open(file2_path, 'w') as f:
+            with open(file2_path, 'w', encoding='utf-8') as f:
                 f.write('Dir2')
 
             # 扫描两个目录
