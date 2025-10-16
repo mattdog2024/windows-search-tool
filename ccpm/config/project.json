@@ -1,0 +1,39 @@
+{
+  "project": {
+    "name": "Windows Search Tool",
+    "level": 2,
+    "type": "Desktop",
+    "version": "0.1.0",
+    "description": "智能文件内容索引和搜索系统"
+  },
+  "status": {
+    "phase": "planning",
+    "current_sprint": 0,
+    "progress": 0
+  },
+  "epics": [
+    {
+      "id": "epic-1",
+      "name": "核心搜索引擎",
+      "stories": 8,
+      "completed": 0
+    },
+    {
+      "id": "epic-2",
+      "name": "用户界面与 AI 增强",
+      "stories": 6,
+      "completed": 0
+    }
+  ],
+  "paths": {
+    "docs": "./docs",
+    "src": "./src",
+    "tests": "./tests"
+  },
+  "next_steps": [
+    "创建 epic-stories.md 文档",
+    "运行解决方案架构工作流",
+    "创建 UX 规格文档",
+    "生成详细用户故事"
+  ]
+}

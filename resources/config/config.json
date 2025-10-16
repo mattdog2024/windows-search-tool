@@ -1,0 +1,61 @@
+{
+  "app": {
+    "name": "Windows Search Tool",
+    "version": "0.1.0",
+    "theme": "light"
+  },
+  "database": {
+    "cache_size_mb": 64,
+    "page_size": 4096,
+    "wal_mode": true
+  },
+  "indexing": {
+    "parallel_workers": 4,
+    "batch_size": 100,
+    "excluded_extensions": [
+      ".exe",
+      ".dll",
+      ".sys",
+      ".tmp",
+      ".bin"
+    ],
+    "excluded_paths": [
+      "C:\\Windows",
+      "C:\\Program Files",
+      "C:\\Program Files (x86)",
+      "node_modules",
+      ".git",
+      "__pycache__"
+    ]
+  },
+  "search": {
+    "results_per_page": 20,
+    "snippet_length": 100,
+    "cache_size": 100,
+    "highlight_style": "background-color: #FFEB3B; font-weight: bold;"
+  },
+  "ai": {
+    "provider": "deepseek",
+    "api_endpoint": "https://api.deepseek.com/v1",
+    "model": "deepseek-chat",
+    "timeout_seconds": 10,
+    "max_retries": 3,
+    "enabled": false,
+    "api_key": ""
+  },
+  "ocr": {
+    "tesseract_path": "C:\\Program Files\\Tesseract-OCR\\tesseract.exe",
+    "languages": [
+      "chi_sim",
+      "eng"
+    ],
+    "confidence_threshold": 60,
+    "enabled": false
+  },
+  "logging": {
+    "level": "INFO",
+    "file": "logs/app.log",
+    "max_size_mb": 10,
+    "backup_count": 5
+  }
+}
