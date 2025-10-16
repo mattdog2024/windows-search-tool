@@ -1,0 +1,38 @@
+{
+  "app": {
+    "name": "Windows Search Tool",
+    "version": "1.0.0",
+    "theme": "light"
+  },
+  "database": {
+    "cache_size_mb": 64,
+    "page_size": 4096,
+    "wal_mode": true
+  },
+  "indexing": {
+    "parallel_workers": 4,
+    "batch_size": 100,
+    "excluded_extensions": [
+      ".exe",
+      ".dll",
+      ".sys"
+    ],
+    "excluded_paths": [
+      "C:\\Windows",
+      "C:\\Program Files"
+    ]
+  },
+  "search": {
+    "results_per_page": 20,
+    "snippet_length": 100,
+    "cache_size": 100
+  },
+  "ocr": {
+    "tesseract_path": "C:\\Program Files\\Tesseract-OCR\\tesseract.exe",
+    "languages": [
+      "chi_sim",
+      "eng"
+    ],
+    "confidence_threshold": 60
+  }
+}
