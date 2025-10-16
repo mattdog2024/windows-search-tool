@@ -18,6 +18,15 @@ class TestPdfParser:
         """创建解析器实例"""
         return PdfParser()
 
+    def _create_mock_pdf(self, pages, metadata=None):
+        """创建支持 context manager 的 mock PDF 对象"""
+        mock_pdf = Mock()
+        mock_pdf.pages = pages
+        mock_pdf.metadata = metadata or {}
+        mock_pdf.__enter__ = Mock(return_value=mock_pdf)
+        mock_pdf.__exit__ = Mock(return_value=False)
+        return mock_pdf
+
     def test_init(self, parser):
         """测试初始化"""
         assert parser is not None
@@ -44,17 +53,19 @@ class TestPdfParser:
 
     def test_parse_with_mock_pdf(self, parser):
         """测试解析 PDF（使用 mock）"""
-        # 创建 mock PDF 对象
+        # 创建 mock 页面
         mock_page = Mock()
         mock_page.extract_text.return_value = "This is test content from page 1."
 
-        mock_pdf = Mock()
-        mock_pdf.pages = [mock_page]
-        mock_pdf.metadata = {
-            'Author': 'Test Author',
-            'Title': 'Test Title',
-            'CreationDate': 'D:20230101120000',
-        }
+        # 创建 mock PDF 对象
+        mock_pdf = self._create_mock_pdf(
+            pages=[mock_page],
+            metadata={
+                'Author': 'Test Author',
+                'Title': 'Test Title',
+                'CreationDate': 'D:20230101120000',
+            }
+        )
 
         with patch('pdfplumber.open', return_value=mock_pdf):
             # 创建临时文件
@@ -82,9 +93,7 @@ class TestPdfParser:
         mock_page2 = Mock()
         mock_page2.extract_text.return_value = "Content from page 2."
 
-        mock_pdf = Mock()
-        mock_pdf.pages = [mock_page1, mock_page2]
-        mock_pdf.metadata = {}
+        mock_pdf = self._create_mock_pdf(pages=[mock_page1, mock_page2])
 
         with patch('pdfplumber.open', return_value=mock_pdf):
             with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as f:
@@ -106,9 +115,7 @@ class TestPdfParser:
         mock_page = Mock()
         mock_page.extract_text.return_value = "abc"  # 很少的文本
 
-        mock_pdf = Mock()
-        mock_pdf.pages = [mock_page]
-        mock_pdf.metadata = {}
+        mock_pdf = self._create_mock_pdf(pages=[mock_page])
 
         with patch('pdfplumber.open', return_value=mock_pdf):
             with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as f:
@@ -128,9 +135,7 @@ class TestPdfParser:
         mock_page = Mock()
         mock_page.extract_text.return_value = "This is a normal text PDF with lots of content. " * 10
 
-        mock_pdf = Mock()
-        mock_pdf.pages = [mock_page]
-        mock_pdf.metadata = {}
+        mock_pdf = self._create_mock_pdf(pages=[mock_page])
 
         with patch('pdfplumber.open', return_value=mock_pdf):
             with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as f:
@@ -149,9 +154,7 @@ class TestPdfParser:
         mock_page = Mock()
         mock_page.extract_text.return_value = "这是一个包含中文内容的PDF文档。\nChinese content test."
 
-        mock_pdf = Mock()
-        mock_pdf.pages = [mock_page]
-        mock_pdf.metadata = {}
+        mock_pdf = self._create_mock_pdf(pages=[mock_page])
 
         with patch('pdfplumber.open', return_value=mock_pdf):
             with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as f:
@@ -177,9 +180,7 @@ class TestPdfParser:
         mock_page3 = Mock()
         mock_page3.extract_text.return_value = "Content on page 3."
 
-        mock_pdf = Mock()
-        mock_pdf.pages = [mock_page1, mock_page2, mock_page3]
-        mock_pdf.metadata = {}
+        mock_pdf = self._create_mock_pdf(pages=[mock_page1, mock_page2, mock_page3])
 
         with patch('pdfplumber.open', return_value=mock_pdf):
             with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as f:
@@ -221,9 +222,7 @@ class TestPdfParser:
         mock_page3 = Mock()
         mock_page3.extract_text.return_value = "Page 3 content."
 
-        mock_pdf = Mock()
-        mock_pdf.pages = [mock_page1, mock_page2, mock_page3]
-        mock_pdf.metadata = {}
+        mock_pdf = self._create_mock_pdf(pages=[mock_page1, mock_page2, mock_page3])
 
         with patch('pdfplumber.open', return_value=mock_pdf):
             with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as f:
@@ -244,12 +243,13 @@ class TestPdfParser:
         mock_page = Mock()
         mock_page.extract_text.return_value = "Test content with enough text to not be scanned."
 
-        mock_pdf = Mock()
-        mock_pdf.pages = [mock_page]
-        mock_pdf.metadata = {
-            'Author': 'Test Author',
-            'Title': 'Test Title',
-        }
+        mock_pdf = self._create_mock_pdf(
+            pages=[mock_page],
+            metadata={
+                'Author': 'Test Author',
+                'Title': 'Test Title',
+            }
+        )
 
         with patch('pdfplumber.open', return_value=mock_pdf):
             with tempfile.NamedTemporaryFile(suffix='.pdf', delete=False) as f:
