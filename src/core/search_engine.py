@@ -6,10 +6,14 @@
 
 import logging
 import time
+from collections import Counter, OrderedDict
 from dataclasses import dataclass
-from typing import List, Dict, Optional, Any
+from datetime import datetime
+from functools import lru_cache
+from typing import List, Dict, Optional, Any, Tuple
 
 from ..data.db_manager import DBManager
+from ..utils.config import ConfigManager
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +57,9 @@ class SearchResponse:
         page: 当前页码(从 1 开始)
         page_size: 每页结果数
         total_pages: 总页数
+        has_next_page: 是否有下一页
+        has_prev_page: 是否有上一页
+        cache_hit: 是否命中缓存
     """
     results: List[SearchResult]
     total: int
@@ -62,6 +69,9 @@ class SearchResponse:
     page: int
     page_size: int
     total_pages: int
+    has_next_page: bool = False
+    has_prev_page: bool = False
+    cache_hit: bool = False
 
 
 class SearchEngine:
@@ -99,7 +109,26 @@ class SearchEngine:
             raise TypeError("db_manager 必须是 DBManager 实例")
 
         self.db_manager = db_manager
-        logger.info("SearchEngine 初始化完成")
+        self.config = ConfigManager()
+
+        # 从配置获取缓存大小
+        self._cache_size = self.config.get('search.cache_size', 100)
+
+        # LRU 缓存存储 (使用 OrderedDict 实现)
+        self._cache: OrderedDict[str, SearchResponse] = OrderedDict()
+        self._cache_hits = 0
+        self._cache_misses = 0
+
+        # 搜索历史记录 (记录最近的搜索,带时间戳)
+        self._search_history: List[Dict[str, Any]] = []
+        self._max_history_size = 50  # 保存最近50条搜索历史
+
+        # 搜索统计信息
+        self._total_searches = 0
+        self._search_queries: List[str] = []  # 保存所有查询历史
+        self._query_times: List[float] = []  # 保存所有查询耗时
+
+        logger.info(f"SearchEngine 初始化完成, 缓存大小: {self._cache_size}")
 
     def search(
         self,
@@ -107,7 +136,8 @@ class SearchEngine:
         mode: str = 'fuzzy',
         limit: int = 20,
         offset: int = 0,
-        file_types: Optional[List[str]] = None
+        file_types: Optional[List[str]] = None,
+        use_cache: bool = True
     ) -> SearchResponse:
         """
         执行搜索
@@ -122,6 +152,7 @@ class SearchEngine:
             limit: 返回结果数量限制,默认 20
             offset: 结果偏移量,用于分页,默认 0
             file_types: 可选的文件类型过滤列表,如 ['txt', 'pdf']
+            use_cache: 是否使用缓存,默认 True
 
         Returns:
             SearchResponse: 搜索响应对象,包含结果列表和元信息
@@ -152,6 +183,26 @@ class SearchEngine:
         if offset < 0:
             raise ValueError("offset 必须大于或等于 0")
 
+        # 生成缓存键
+        cache_key = self._make_cache_key(query, mode, limit, offset, file_types)
+
+        # 尝试从缓存获取
+        if use_cache:
+            cached_response = self._get_from_cache(cache_key)
+            if cached_response:
+                # 更新耗时(缓存命中很快)
+                cached_response.elapsed_time = time.time() - start_time
+                cached_response.cache_hit = True
+                self._cache_hits += 1
+
+                # 记录到历史
+                self._add_to_history(query, mode, cached_response.total, True)
+
+                logger.info(f"缓存命中: query='{query}', mode={mode}")
+                return cached_response
+
+        self._cache_misses += 1
+
         # 构建 FTS5 查询
         fts_query = self._build_fts_query(query, mode)
 
@@ -172,18 +223,25 @@ class SearchEngine:
             # 获取总结果数(无分页限制)
             total = self._count_total_results(fts_query, file_types)
 
-            # 计算总页数
+            # 计算总页数和分页信息
             page = (offset // limit) + 1
             total_pages = (total + limit - 1) // limit if limit > 0 else 0
+            has_next_page = page < total_pages
+            has_prev_page = page > 1
 
             elapsed_time = time.time() - start_time
+
+            # 更新统计信息
+            self._total_searches += 1
+            self._search_queries.append(query)
+            self._query_times.append(elapsed_time)
 
             logger.info(
                 f"搜索完成: 找到 {total} 个结果, "
                 f"返回 {len(results)} 个, 耗时 {elapsed_time:.3f}s"
             )
 
-            return SearchResponse(
+            response = SearchResponse(
                 results=results,
                 total=total,
                 query=query,
@@ -191,8 +249,20 @@ class SearchEngine:
                 elapsed_time=elapsed_time,
                 page=page,
                 page_size=limit,
-                total_pages=total_pages
+                total_pages=total_pages,
+                has_next_page=has_next_page,
+                has_prev_page=has_prev_page,
+                cache_hit=False
             )
+
+            # 添加到缓存
+            if use_cache:
+                self._put_to_cache(cache_key, response)
+
+            # 记录到历史
+            self._add_to_history(query, mode, total, False)
+
+            return response
 
         except Exception as e:
             logger.error(f"搜索失败: {e}", exc_info=True)
@@ -329,3 +399,307 @@ class SearchEngine:
         except Exception as e:
             logger.error(f"统计结果总数失败: {e}")
             return 0
+
+    # ==================== 缓存管理方法 ====================
+
+    def _make_cache_key(
+        self,
+        query: str,
+        mode: str,
+        limit: int,
+        offset: int,
+        file_types: Optional[List[str]]
+    ) -> str:
+        """
+        生成缓存键
+
+        Args:
+            query: 查询字符串
+            mode: 搜索模式
+            limit: 结果限制
+            offset: 偏移量
+            file_types: 文件类型过滤
+
+        Returns:
+            str: 缓存键
+        """
+        # 将文件类型列表转换为元组以便哈希
+        ft_tuple = tuple(sorted(file_types)) if file_types else None
+        return f"{query}|{mode}|{limit}|{offset}|{ft_tuple}"
+
+    def _get_from_cache(self, cache_key: str) -> Optional[SearchResponse]:
+        """
+        从缓存获取搜索结果
+
+        Args:
+            cache_key: 缓存键
+
+        Returns:
+            Optional[SearchResponse]: 缓存的搜索响应,如果不存在返回 None
+        """
+        if cache_key in self._cache:
+            # LRU: 将访问的项移到末尾
+            self._cache.move_to_end(cache_key)
+            logger.debug(f"缓存命中: {cache_key}")
+            return self._cache[cache_key]
+        return None
+
+    def _put_to_cache(self, cache_key: str, response: SearchResponse):
+        """
+        将搜索结果放入缓存
+
+        Args:
+            cache_key: 缓存键
+            response: 搜索响应
+        """
+        # 如果缓存已满,移除最久未使用的项
+        if len(self._cache) >= self._cache_size:
+            # FIFO: 移除第一个项(最久未使用)
+            self._cache.popitem(last=False)
+            logger.debug(f"缓存已满,移除最久未使用的项")
+
+        self._cache[cache_key] = response
+        logger.debug(f"添加到缓存: {cache_key}")
+
+    def clear_cache(self):
+        """
+        清空搜索缓存
+
+        在索引更新后或手动调用时清除所有缓存的搜索结果。
+        """
+        self._cache.clear()
+        logger.info("搜索缓存已清空")
+
+    def get_cache_stats(self) -> Dict[str, Any]:
+        """
+        获取缓存统计信息
+
+        Returns:
+            Dict: 包含缓存大小、命中率等信息的字典
+        """
+        total_requests = self._cache_hits + self._cache_misses
+        hit_rate = (self._cache_hits / total_requests * 100) if total_requests > 0 else 0
+
+        return {
+            'cache_size': len(self._cache),
+            'max_cache_size': self._cache_size,
+            'cache_hits': self._cache_hits,
+            'cache_misses': self._cache_misses,
+            'hit_rate': f"{hit_rate:.2f}%"
+        }
+
+    # ==================== 排序方法 ====================
+
+    def search_with_sort(
+        self,
+        query: str,
+        mode: str = 'fuzzy',
+        limit: int = 20,
+        offset: int = 0,
+        file_types: Optional[List[str]] = None,
+        sort_by: str = 'rank',
+        sort_order: str = 'asc',
+        use_cache: bool = True
+    ) -> SearchResponse:
+        """
+        执行搜索并支持自定义排序
+
+        Args:
+            query: 搜索查询字符串
+            mode: 搜索模式 (exact/fuzzy)
+            limit: 返回结果数量限制
+            offset: 结果偏移量
+            file_types: 文件类型过滤列表
+            sort_by: 排序字段,可选值:
+                - 'rank': 按相关度排序 (默认)
+                - 'modified': 按修改时间排序
+                - 'name': 按文件名排序
+                - 'size': 按文件大小排序
+            sort_order: 排序顺序 ('asc' 或 'desc')
+            use_cache: 是否使用缓存
+
+        Returns:
+            SearchResponse: 搜索响应对象
+
+        Raises:
+            ValueError: 如果 sort_by 或 sort_order 无效
+
+        Example:
+            >>> # 按修改时间降序排列
+            >>> response = engine.search_with_sort(
+            ...     "python",
+            ...     sort_by='modified',
+            ...     sort_order='desc'
+            ... )
+        """
+        # 验证排序参数
+        valid_sort_fields = ['rank', 'modified', 'name', 'size']
+        if sort_by not in valid_sort_fields:
+            raise ValueError(f"无效的排序字段: {sort_by},必须是 {valid_sort_fields} 之一")
+
+        if sort_order not in ['asc', 'desc']:
+            raise ValueError(f"无效的排序顺序: {sort_order},必须是 'asc' 或 'desc'")
+
+        # 先执行基本搜索
+        response = self.search(
+            query=query,
+            mode=mode,
+            limit=limit,
+            offset=offset,
+            file_types=file_types,
+            use_cache=use_cache
+        )
+
+        # 如果不是按相关度排序,需要对结果重新排序
+        if sort_by != 'rank':
+            response.results = self._sort_results(
+                response.results,
+                sort_by,
+                sort_order
+            )
+
+        return response
+
+    def _sort_results(
+        self,
+        results: List[SearchResult],
+        sort_by: str,
+        sort_order: str
+    ) -> List[SearchResult]:
+        """
+        对搜索结果进行排序
+
+        Args:
+            results: 搜索结果列表
+            sort_by: 排序字段
+            sort_order: 排序顺序
+
+        Returns:
+            List[SearchResult]: 排序后的结果列表
+        """
+        reverse = (sort_order == 'desc')
+
+        if sort_by == 'rank':
+            # 按相关度排序 (rank 越小越相关,因为是负值)
+            results.sort(key=lambda x: x.rank, reverse=False)
+        elif sort_by == 'modified':
+            # 按修改时间排序
+            results.sort(
+                key=lambda x: x.metadata.get('modified_at', ''),
+                reverse=reverse
+            )
+        elif sort_by == 'name':
+            # 按文件名排序
+            results.sort(
+                key=lambda x: x.file_name.lower(),
+                reverse=reverse
+            )
+        elif sort_by == 'size':
+            # 按文件大小排序
+            results.sort(
+                key=lambda x: x.metadata.get('file_size', 0),
+                reverse=reverse
+            )
+
+        return results
+
+    # ==================== 搜索历史方法 ====================
+
+    def _add_to_history(
+        self,
+        query: str,
+        mode: str,
+        result_count: int,
+        cache_hit: bool
+    ):
+        """
+        添加搜索记录到历史
+
+        Args:
+            query: 查询字符串
+            mode: 搜索模式
+            result_count: 结果数量
+            cache_hit: 是否命中缓存
+        """
+        history_entry = {
+            'query': query,
+            'mode': mode,
+            'result_count': result_count,
+            'cache_hit': cache_hit,
+            'timestamp': datetime.now().isoformat()
+        }
+
+        self._search_history.append(history_entry)
+
+        # 保持历史记录在限制范围内
+        if len(self._search_history) > self._max_history_size:
+            self._search_history.pop(0)
+
+        logger.debug(f"添加搜索历史: {query}")
+
+    def get_search_history(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """
+        获取搜索历史记录
+
+        Args:
+            limit: 返回的历史记录数量,默认 10
+
+        Returns:
+            List[Dict]: 搜索历史记录列表,按时间倒序排列
+
+        Example:
+            >>> history = engine.get_search_history(limit=5)
+            >>> for entry in history:
+            ...     print(f"{entry['timestamp']}: {entry['query']} ({entry['result_count']} 结果)")
+        """
+        # 返回最近的 limit 条记录,倒序排列
+        return list(reversed(self._search_history[-limit:]))
+
+    def get_popular_queries(self, top_n: int = 10) -> List[Tuple[str, int]]:
+        """
+        获取最热门的搜索查询
+
+        Args:
+            top_n: 返回前 N 个热门查询,默认 10
+
+        Returns:
+            List[Tuple[str, int]]: 查询和频次的元组列表,按频次降序排列
+
+        Example:
+            >>> popular = engine.get_popular_queries(top_n=5)
+            >>> for query, count in popular:
+            ...     print(f"{query}: {count} 次")
+        """
+        # 使用 Counter 统计查询频次
+        query_counter = Counter(self._search_queries)
+        return query_counter.most_common(top_n)
+
+    def get_stats(self) -> Dict[str, Any]:
+        """
+        获取搜索引擎统计信息
+
+        Returns:
+            Dict: 包含各种统计指标的字典
+
+        Example:
+            >>> stats = engine.get_stats()
+            >>> print(f"总搜索次数: {stats['total_searches']}")
+            >>> print(f"平均查询时间: {stats['avg_query_time']}")
+            >>> print(f"缓存命中率: {stats['cache_hit_rate']}")
+        """
+        total_searches = self._total_searches
+        avg_query_time = (
+            sum(self._query_times) / len(self._query_times)
+            if self._query_times else 0
+        )
+
+        cache_stats = self.get_cache_stats()
+
+        return {
+            'total_searches': total_searches,
+            'avg_query_time': f"{avg_query_time:.3f}s",
+            'cache_hit_rate': cache_stats['hit_rate'],
+            'cache_size': cache_stats['cache_size'],
+            'history_size': len(self._search_history),
+            'unique_queries': len(set(self._search_queries))
+        }
