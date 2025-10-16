@@ -333,3 +333,204 @@ class IndexManager:
 
         logger.info(f"扫描 {len(directories)} 个目录, 总共找到 {len(all_files)} 个文件")
         return all_files
+
+    # ==================== 文件解析和索引创建功能 ====================
+
+    def create_index(
+        self,
+        paths: List[str],
+        progress_callback: Optional[ProgressCallback] = None
+    ) -> IndexStats:
+        """
+        创建完整索引
+
+        扫描指定路径,解析文件内容并批量插入数据库。
+
+        Args:
+            paths: 要索引的目录或文件路径列表
+            progress_callback: 进度回调函数 (已处理数量, 总数量, 当前文件路径)
+
+        Returns:
+            IndexStats: 索引统计信息
+
+        Example:
+            >>> def on_progress(processed, total, current):
+            ...     print(f"进度: {processed}/{total} - {current}")
+            >>> manager = IndexManager()
+            >>> stats = manager.create_index(['E:/Documents'], on_progress)
+            >>> print(f"索引完成: {stats.indexed_files}/{stats.total_files}")
+        """
+        logger.info(f"开始创建索引: {len(paths)} 个路径")
+        start_time = time.time()
+        stats = IndexStats()
+
+        try:
+            # 1. 扫描文件列表
+            files = self.list_files(paths, recursive=True)
+            stats.total_files = len(files)
+
+            if stats.total_files == 0:
+                logger.warning("没有找到可索引的文件")
+                stats.elapsed_time = time.time() - start_time
+                return stats
+
+            logger.info(f"找到 {stats.total_files} 个文件待索引")
+
+            # 2. 遍历每个文件进行解析
+            documents_batch = []
+            processed_count = 0
+
+            for file_info in files:
+                # 解析文件
+                parse_result = self._parse_file(file_info)
+
+                if parse_result is None:
+                    # 解析失败
+                    stats.failed_files += 1
+                    processed_count += 1
+                    continue
+
+                # 添加到批次
+                documents_batch.append(parse_result)
+                stats.total_size += file_info['size']
+                processed_count += 1
+
+                # 调用进度回调
+                if progress_callback:
+                    progress_callback(processed_count, stats.total_files, file_info['path'])
+
+                # 批量插入
+                if len(documents_batch) >= self.batch_size:
+                    inserted_count = self._batch_insert(documents_batch)
+                    stats.indexed_files += inserted_count
+                    documents_batch.clear()
+
+            # 3. 插入剩余的文档
+            if documents_batch:
+                inserted_count = self._batch_insert(documents_batch)
+                stats.indexed_files += inserted_count
+
+            # 4. 更新统计信息
+            stats.elapsed_time = time.time() - start_time
+            stats.skipped_files = stats.total_files - stats.indexed_files - stats.failed_files
+
+            logger.info(
+                f"索引创建完成: 总计={stats.total_files}, "
+                f"成功={stats.indexed_files}, "
+                f"失败={stats.failed_files}, "
+                f"跳过={stats.skipped_files}, "
+                f"耗时={stats.elapsed_time:.2f}秒"
+            )
+
+            return stats
+
+        except Exception as e:
+            logger.error(f"创建索引失败: {e}")
+            stats.elapsed_time = time.time() - start_time
+            raise
+
+    def _parse_file(self, file_info: Dict[str, any]) -> Optional[Dict[str, any]]:
+        """
+        解析单个文件
+
+        使用 ParserFactory 获取合适的解析器,解析文件内容。
+
+        Args:
+            file_info: 文件信息字典,包含 path, size, modified, hash 等字段
+
+        Returns:
+            文档数据字典,如果解析失败则返回 None
+            字典包含以下字段:
+            - file_path: 文件路径
+            - file_name: 文件名
+            - file_size: 文件大小
+            - file_type: 文件类型(扩展名)
+            - content_hash: 文件哈希值
+            - created_at: 创建时间
+            - modified_at: 修改时间
+            - content: 文件内容(用于全文搜索)
+            - metadata: 元数据字典
+        """
+        file_path = file_info['path']
+
+        try:
+            # 1. 获取解析器
+            parser = self.parser_factory.get_parser(file_path)
+            if parser is None:
+                logger.warning(f"未找到合适的解析器: {file_path}")
+                return None
+
+            # 2. 解析文件
+            result = parser.parse(file_path)
+
+            if not result.success:
+                logger.warning(f"解析失败: {file_path}, 错误: {result.error}")
+                return None
+
+            # 3. 提取文件信息
+            _, ext = os.path.splitext(file_path)
+            file_name = os.path.basename(file_path)
+
+            # 4. 构建文档数据
+            doc_data = {
+                'file_path': file_path,
+                'file_name': file_name,
+                'file_size': file_info['size'],
+                'file_type': ext.lstrip('.').lower() if ext else '',
+                'content_hash': file_info['hash'],
+                'created_at': None,  # SQLite 会使用默认值
+                'modified_at': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(file_info['modified'])),
+                'content': result.content,
+                'metadata': result.metadata
+            }
+
+            logger.debug(f"解析成功: {file_path}")
+            return doc_data
+
+        except Exception as e:
+            logger.error(f"解析文件异常: {file_path}, 错误: {e}")
+            return None
+
+    def _batch_insert(self, documents: List[Dict[str, any]]) -> int:
+        """
+        批量插入文档到数据库
+
+        Args:
+            documents: 文档数据列表
+
+        Returns:
+            成功插入的文档数量
+        """
+        if not documents:
+            return 0
+
+        try:
+            # 调用数据库管理器的批量插入方法
+            doc_ids = self.db.batch_insert_documents(documents, batch_size=self.batch_size)
+
+            logger.info(f"批量插入成功: {len(doc_ids)} 个文档")
+            return len(doc_ids)
+
+        except Exception as e:
+            logger.error(f"批量插入失败: {e}")
+            # 如果批量插入失败,尝试逐个插入
+            success_count = 0
+            for doc in documents:
+                try:
+                    self.db.insert_document(
+                        file_path=doc['file_path'],
+                        file_name=doc['file_name'],
+                        content=doc['content'],
+                        file_size=doc.get('file_size'),
+                        file_type=doc.get('file_type'),
+                        content_hash=doc.get('content_hash'),
+                        created_at=doc.get('created_at'),
+                        modified_at=doc.get('modified_at'),
+                        metadata=doc.get('metadata')
+                    )
+                    success_count += 1
+                except Exception as e2:
+                    logger.error(f"插入单个文档失败: {doc['file_path']}, 错误: {e2}")
+
+            logger.info(f"逐个插入完成: {success_count}/{len(documents)} 个文档")
+            return success_count
