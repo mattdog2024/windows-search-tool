@@ -92,6 +92,47 @@ windows-search-tool/
 
 ## 🔧 开发指南
 
+### 开发环境设置
+
+```bash
+# 安装开发依赖
+pip install -r requirements-dev.txt
+
+# 安装生产依赖
+pip install -r requirements.txt
+```
+
+### 核心工具类使用
+
+#### 文件工具类 (file_utils)
+
+文件工具类提供了丰富的文件系统操作功能:
+
+```python
+from src.utils.file_utils import (
+    normalize_path,
+    ensure_dir,
+    calculate_file_hash,
+    format_file_size,
+    safe_filename
+)
+
+# 路径处理
+path = normalize_path("./data/file.txt")  # 转换为绝对路径
+
+# 创建目录
+output_dir = ensure_dir("./output/logs")  # 自动创建不存在的目录
+
+# 计算文件哈希(用于检测文件变更)
+hash_value = calculate_file_hash("document.pdf")  # SHA256
+
+# 格式化文件大小
+size_str = format_file_size(1048576)  # "1.00 MB"
+
+# 生成安全的文件名
+safe_name = safe_filename("file:name?.txt")  # "file_name_.txt"
+```
+
 ### 运行测试
 
 ```bash
@@ -101,8 +142,14 @@ pytest
 # 运行单元测试
 pytest tests/unit/
 
+# 运行特定测试文件
+pytest tests/unit/test_file_utils.py
+
 # 运行测试并生成覆盖率报告
 pytest --cov=src tests/
+
+# 运行测试并生成 HTML 覆盖率报告
+pytest --cov=src --cov-report=html tests/
 ```
 
 ### 代码格式化
@@ -110,6 +157,9 @@ pytest --cov=src tests/
 ```bash
 # 格式化代码
 black src/ tests/
+
+# 排序导入
+isort src/ tests/
 
 # 检查代码质量
 pylint src/
