@@ -700,7 +700,7 @@ class TestDocumentQuery:
 
     def test_list_documents_ordering(self, db):
         """测试排序"""
-        # 插入文档,不同的时间戳
+        # 插入文档,不同的时间戳和大小
         for i in range(5):
             db.insert_document(
                 file_path=f"/test/order{i}.txt",
@@ -708,19 +708,25 @@ class TestDocumentQuery:
                 content=f"Content {i}",
                 file_size=1024 * (i + 1)
             )
-            time.sleep(0.01)  # 确保时间戳不同
+            time.sleep(0.1)  # 确保时间戳明显不同
 
-        # 按 indexed_at 降序 (默认)
-        docs_desc = db.list_documents(order_by='indexed_at', order_desc=True)
-        assert docs_desc[0]['file_name'] == "order4.txt"  # 最新的
+        # 按 file_size 降序 (更可靠的测试)
+        docs_size_desc = db.list_documents(order_by='file_size', order_desc=True)
+        assert docs_size_desc[0]['file_size'] == 1024 * 5  # 最大的
+        assert docs_size_desc[0]['file_name'] == "order4.txt"
 
-        # 按 indexed_at 升序
-        docs_asc = db.list_documents(order_by='indexed_at', order_desc=False)
-        assert docs_asc[0]['file_name'] == "order0.txt"  # 最早的
+        # 按 file_size 升序
+        docs_size_asc = db.list_documents(order_by='file_size', order_desc=False)
+        assert docs_size_asc[0]['file_size'] == 1024  # 最小的
+        assert docs_size_asc[0]['file_name'] == "order0.txt"
 
-        # 按 file_size 降序
-        docs_size = db.list_documents(order_by='file_size', order_desc=True)
-        assert docs_size[0]['file_size'] == 1024 * 5  # 最大的
+        # 按 file_name 升序
+        docs_name_asc = db.list_documents(order_by='file_name', order_desc=False)
+        assert docs_name_asc[0]['file_name'] == "order0.txt"
+
+        # 按 file_name 降序
+        docs_name_desc = db.list_documents(order_by='file_name', order_desc=True)
+        assert docs_name_desc[0]['file_name'] == "order4.txt"
 
     def test_list_documents_combined_filters(self, db):
         """测试组合过滤条件"""

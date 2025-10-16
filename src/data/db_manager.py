@@ -64,6 +64,9 @@ class DBManager:
             )
             self.connection.row_factory = sqlite3.Row
 
+            # 启用外键约束
+            self.connection.execute("PRAGMA foreign_keys=ON")
+
             logger.info(f"数据库连接已建立: {self.db_path}")
 
             # 配置性能优化
