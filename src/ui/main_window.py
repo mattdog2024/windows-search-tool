@@ -62,6 +62,7 @@ class MainWindow:
         self.on_new_index_callback: Optional[Callable] = None
         self.on_open_index_callback: Optional[Callable] = None
         self.on_content_preview_callback: Optional[Callable] = None
+        self.on_library_change_callback: Optional[Callable] = None  # 索引库变化回调
 
         # 当前搜索关键词
         self.current_search_query: str = ""
@@ -482,6 +483,10 @@ class MainWindow:
         self._clear_preview()
         self.set_status(f"搜索范围已更新: {self.library_manager.get_selection_summary()}")
 
+        # 通知控制器更新窗口标题
+        if self.on_library_change_callback:
+            self.on_library_change_callback()
+
     def _on_search_key_release(self, event):
         """搜索框按键释放事件 - 提供自动完成建议"""
         # 忽略特殊键
@@ -539,6 +544,10 @@ class MainWindow:
     def set_content_preview_callback(self, callback: Callable):
         """设置内容预览回调"""
         self.on_content_preview_callback = callback
+
+    def set_library_change_callback(self, callback: Callable):
+        """设置索引库选择变化回调"""
+        self.on_library_change_callback = callback
 
     def set_db_manager(self, db_manager):
         """
@@ -615,22 +624,16 @@ class MainWindow:
 
         if directory:
             logger.info(f"Adding directory to index: {directory}")
-            self.set_status(f"正在索引: {directory}")
-            self.progress_bar.start()
 
             if self.on_index_callback:
                 try:
+                    # 调用回调，后台线程会自己处理进度显示
                     self.on_index_callback(directory)
-                    self.set_status("索引完成")
-                    messagebox.showinfo("成功", f"成功索引目录: {directory}")
                 except Exception as e:
                     logger.error(f"Indexing failed: {e}")
                     messagebox.showerror("错误", f"索引失败: {e}")
                     self.set_status("索引失败")
-                finally:
-                    self.progress_bar.stop()
             else:
-                self.progress_bar.stop()
                 self.set_status("索引功能未实现")
 
     def _update_index(self):
@@ -853,6 +856,7 @@ class MainWindow:
         item = self.results_tree.item(selection[0])
         file_path = item['values'][1]  # 路径列
         file_name = item['values'][0]  # 文件名列
+        library_name = item['values'][2]  # 索引库列
 
         # 从 tags 中提取文档 ID
         tags = item.get('tags', [])
@@ -866,9 +870,9 @@ class MainWindow:
                     pass
 
         # 更新预览
-        self._update_preview(doc_id, file_path, file_name)
+        self._update_preview(doc_id, file_path, file_name, library_name)
 
-    def _update_preview(self, doc_id: int, file_path: str, file_name: str):
+    def _update_preview(self, doc_id: int, file_path: str, file_name: str, library_name: str = ""):
         """
         更新预览面板内容
 
@@ -876,6 +880,7 @@ class MainWindow:
             doc_id: 文档 ID
             file_path: 文件路径
             file_name: 文件名
+            library_name: 索引库名称
         """
         # 更新文件信息
         file_exists = Path(file_path).exists()
@@ -886,7 +891,7 @@ class MainWindow:
         )
 
         # 获取内容
-        content = self._get_file_content(doc_id, file_path)
+        content = self._get_file_content(doc_id, file_path, library_name)
 
         if content is None:
             self._show_preview_error("无法读取文件内容")
@@ -895,27 +900,51 @@ class MainWindow:
         # 显示内容并高亮关键词
         self._display_preview_content(content)
 
-    def _get_file_content(self, doc_id: int, file_path: str) -> Optional[str]:
+    def _get_file_content(self, doc_id: int, file_path: str, library_name: str = "") -> Optional[str]:
         """
         获取文件内容(优先从数据库读取)
 
         Args:
             doc_id: 文档 ID
             file_path: 文件路径
+            library_name: 索引库名称
 
         Returns:
             文件内容,或 None 如果无法读取
         """
-        # 如果有 db_manager,尝试从数据库读取
-        if hasattr(self, '_db_manager_ref') and self._db_manager_ref:
+        # 根据库名获取正确的数据库路径
+        db_manager_to_use = None
+
+        if library_name and self.library_manager:
+            # 获取指定库的信息
+            library = self.library_manager.get_library(library_name)
+            if library:
+                # 为这个库创建临时数据库连接
+                from src.data.db_manager import DBManager
+                try:
+                    db_manager_to_use = DBManager(library.db_path)
+                except Exception as e:
+                    logger.warning(f"Failed to create db_manager for library '{library_name}': {e}")
+
+        # 如果没有指定库名或获取失败,使用默认的 db_manager
+        if not db_manager_to_use and hasattr(self, '_db_manager_ref') and self._db_manager_ref:
+            db_manager_to_use = self._db_manager_ref
+
+        # 尝试从数据库读取
+        if db_manager_to_use:
             try:
-                cursor = self._db_manager_ref.connection.cursor()
+                cursor = db_manager_to_use.connection.cursor()
                 cursor.execute("""
                     SELECT content
                     FROM documents_fts
                     WHERE rowid = ?
                 """, (doc_id,))
                 result = cursor.fetchone()
+
+                # 如果是临时创建的连接,关闭它
+                if library_name and db_manager_to_use != self._db_manager_ref:
+                    db_manager_to_use.close()
+
                 if result and result['content']:
                     content = result['content']
                     # 限制预览大小
@@ -923,6 +952,12 @@ class MainWindow:
                         content = content[:50000] + "\n\n... [内容过长,已截断,仅显示前50000字符]"
                     return content
             except Exception as e:
+                # 如果是临时创建的连接,确保关闭
+                if library_name and db_manager_to_use and db_manager_to_use != self._db_manager_ref:
+                    try:
+                        db_manager_to_use.close()
+                    except:
+                        pass
                 logger.warning(f"Failed to read from database: {e}")
 
         # 如果数据库读取失败，只对纯文本文件尝试从文件系统读取

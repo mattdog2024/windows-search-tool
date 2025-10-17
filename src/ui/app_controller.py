@@ -90,14 +90,29 @@ class AppController:
         self.main_window.set_new_index_callback(self.handle_new_index)
         self.main_window.set_open_index_callback(self.handle_open_index)
         self.main_window.set_content_preview_callback(self.handle_content_preview)
+        self.main_window.set_library_change_callback(self._update_window_title)  # 索引库变化回调
 
         # 设置数据库管理器引用(用于预览面板从数据库读取内容)
         self.main_window.set_db_manager(self.db_manager)
 
-        # 更新窗口标题显示当前索引
-        self.main_window.root.title(f"Windows Search Tool - {self.current_index_name}")
+        # 更新窗口标题显示当前启用的索引库
+        self._update_window_title()
 
         logger.info("UI initialized")
+
+    def _update_window_title(self):
+        """根据启用的索引库更新窗口标题"""
+        enabled_libraries = self.library_manager.get_enabled_libraries()
+
+        if not enabled_libraries:
+            title_text = "Windows Search Tool - 未选择索引库"
+        elif len(enabled_libraries) == 1:
+            title_text = f"Windows Search Tool - {enabled_libraries[0].name}"
+        else:
+            title_text = f"Windows Search Tool - {len(enabled_libraries)} 个索引库"
+
+        if self.main_window:
+            self.main_window.root.title(title_text)
 
     def handle_search(self, query: str, mode: str = "fts") -> List[Dict[str, Any]]:
         """
@@ -218,17 +233,49 @@ class AppController:
         """
         处理索引请求（在后台线程中执行）
 
+        显示索引库选择对话框，将目录添加到选中的索引库
+
         Args:
             directory: 要索引的目录
         """
         logger.info(f"Handling index request for: {directory}")
 
+        # 获取启用的索引库
+        enabled_libraries = self.library_manager.get_enabled_libraries()
+
+        if not enabled_libraries:
+            from tkinter import messagebox
+            messagebox.showwarning(
+                "警告",
+                "没有启用的索引库。\n请先在索引库选择中启用至少一个库。"
+            )
+            return
+
+        # 显示索引库选择对话框
+        from src.ui.library_selection_dialog import show_library_selection_dialog
+
+        target_library = show_library_selection_dialog(
+            self.main_window.root,
+            enabled_libraries,
+            title="选择目标索引库"
+        )
+
+        if not target_library:
+            logger.info("用户取消了索引库选择")
+            return  # 用户取消
+
+        logger.info(f"将目录 {directory} 添加到索引库: {target_library.name}")
+
         # 禁用索引按钮，防止重复索引
-        self.main_window.set_status("准备索引...")
+        self.main_window.set_status(f"准备索引到 '{target_library.name}'...")
 
         def index_worker():
             """后台索引工作线程"""
             try:
+                # 为目标库创建 IndexManager
+                from src.core.index_manager import IndexManager
+                library_index_manager = IndexManager(db_path=target_library.db_path)
+
                 # 定义进度回调（使用 after 方法在主线程更新 GUI）
                 def progress_callback(current: int, total: int, current_file: str):
                     """更新进度条和状态"""
@@ -238,20 +285,38 @@ class AppController:
 
                         # 在主线程中更新 GUI
                         self.main_window.root.after(0, lambda: self._update_progress(
-                            current, total, percentage, file_name
+                            current, total, percentage, f"[{target_library.name}] {file_name}"
                         ))
 
                 # 执行索引 (使用 create_index_parallel 方法)
-                stats = self.index_manager.create_index_parallel(
+                stats = library_index_manager.create_index_parallel(
                     paths=[directory],
                     num_workers=4,
                     progress_callback=progress_callback
                 )
 
-                logger.info(f"Indexing completed: {stats}")
+                logger.info(f"Indexing completed for '{target_library.name}': {stats}")
 
                 # 在主线程中显示完成统计
-                self.main_window.root.after(0, lambda: self._finish_indexing(stats))
+                def finish():
+                    self._finish_indexing(stats)
+
+                    # 查询数据库中的实际文件总数并更新统计
+                    from src.data.db_manager import DBManager
+                    temp_db = DBManager(target_library.db_path)
+                    cursor = temp_db.connection.cursor()
+                    cursor.execute("SELECT COUNT(*) FROM documents")
+                    actual_count = cursor.fetchone()[0]
+                    temp_db.close()
+
+                    # 更新库的统计信息（使用实际的总数）
+                    self.library_manager.update_library_stats(
+                        target_library.name,
+                        doc_count=actual_count,
+                        size_bytes=0  # TODO: 计算实际大小
+                    )
+
+                self.main_window.root.after(0, finish)
 
             except Exception as e:
                 logger.error(f"Indexing failed: {e}")
@@ -292,12 +357,18 @@ class AppController:
             self.search_engine.clear_cache()
             logger.info("搜索缓存已清除（索引更新后）")
 
-        self.main_window.set_status(
+        status_message = (
             f"索引完成! 总计: {stats.total_files} 个文件, "
             f"成功: {stats.indexed_files}, 失败: {stats.failed_files}, "
             f"耗时: {stats.elapsed_time:.2f}秒"
         )
+
+        self.main_window.set_status(status_message)
         self.main_window.update_progress_bar(0)  # 隐藏进度条
+
+        # 显示成功提示
+        from tkinter import messagebox
+        messagebox.showinfo("索引完成", status_message)
 
     def _indexing_error(self, error_msg: str):
         """
@@ -315,92 +386,175 @@ class AppController:
         """
         处理增量更新索引请求（在后台线程中执行）
 
-        检测文件变化并更新索引
+        更新所有启用的索引库，使用多索引库更新进度对话框
         """
-        logger.info("Handling update index request")
+        logger.info("Handling update index request for all enabled libraries")
 
-        self.main_window.set_status("准备更新索引...")
+        # 获取所有启用的索引库
+        enabled_libraries = self.library_manager.get_enabled_libraries()
+
+        if not enabled_libraries:
+            from tkinter import messagebox
+            messagebox.showinfo(
+                "提示",
+                "没有启用的索引库。\n请先在索引库选择中启用至少一个库。"
+            )
+            return
+
+        # 创建多索引库更新进度对话框
+        from src.ui.multi_index_update_dialog import MultiIndexUpdateDialog, UpdateStatus
+
+        update_dialog = MultiIndexUpdateDialog(
+            self.main_window.root,
+            enabled_libraries,
+            on_close=lambda: self._on_update_dialog_close()
+        )
+        update_dialog.show()
+
+        # 保存对话框引用
+        self.update_dialog = update_dialog
 
         def update_worker():
             """后台增量更新工作线程"""
-            try:
-                # 定义进度回调
-                def progress_callback(current: int, total: int, current_file: str):
-                    """更新进度条和状态"""
-                    if total > 0:
-                        percentage = int((current / total) * 100)
-                        file_name = current_file.split('\\')[-1] if current_file else ""
+            import os
 
-                        # 在主线程中更新 GUI
-                        self.main_window.root.after(0, lambda: self._update_progress(
-                            current, total, percentage, f"检查: {file_name}"
+            try:
+                logger.info(f"将更新 {len(enabled_libraries)} 个索引库")
+
+                # 累计统计信息
+                from src.core.index_manager import IndexStats
+                total_stats = IndexStats()
+
+                # 对每个启用的库进行更新
+                for lib_index, library in enumerate(enabled_libraries, 1):
+                    logger.info(f"开始更新索引库 {lib_index}/{len(enabled_libraries)}: {library.name}")
+
+                    try:
+                        # 1. 检查目录状态
+                        self.main_window.root.after(0, lambda lib=library: update_dialog.update_library_status(
+                            lib.name, UpdateStatus.CHECKING
                         ))
 
-                # 获取数据库中所有已索引的文件路径
-                cursor = self.db_manager.connection.cursor()
-                cursor.execute("""
-                    SELECT DISTINCT file_path
-                    FROM documents
-                    WHERE status = 'active'
-                """)
+                        # 获取该库中所有已索引的文件路径
+                        from src.data.db_manager import DBManager
+                        lib_db = DBManager(library.db_path)
+                        cursor = lib_db.connection.cursor()
+                        cursor.execute("""
+                            SELECT DISTINCT file_path
+                            FROM documents
+                            WHERE status = 'active'
+                        """)
 
-                rows = cursor.fetchall()
+                        rows = cursor.fetchall()
 
-                if not rows:
-                    # 没有已索引的文件
-                    def show_no_files():
-                        from tkinter import messagebox
-                        messagebox.showinfo(
-                            "提示",
-                            "当前索引库中没有文件。\n请先使用 '添加目录' 功能进行索引。"
+                        if not rows:
+                            logger.info(f"索引库 '{library.name}' 中没有文件,跳过")
+                            self.main_window.root.after(0, lambda lib=library: update_dialog.update_library_status(
+                                lib.name, UpdateStatus.COMPLETED, progress=100,
+                                stats={'added': 0, 'updated': 0, 'deleted': 0}
+                            ))
+                            lib_db.close()
+                            continue
+
+                        # 提取所有唯一的根目录并检查是否存在
+                        unique_dirs = set()
+                        for row in rows:
+                            file_path = row['file_path']
+                            dir_path = os.path.dirname(file_path)
+                            parts = dir_path.split(os.sep)
+                            if len(parts) > 3:
+                                root_dir = os.sep.join(parts[:4])
+                            else:
+                                root_dir = dir_path
+                            unique_dirs.add(root_dir)
+
+                        # 过滤出存在的目录
+                        existing_dirs = [d for d in unique_dirs if os.path.exists(d)]
+
+                        if not existing_dirs:
+                            logger.info(f"索引库 '{library.name}' 的所有目录都不存在,跳过更新但保留索引内容")
+                            self.main_window.root.after(0, lambda lib=library: update_dialog.update_library_status(
+                                lib.name, UpdateStatus.SKIPPED, progress=100, directory_exists=False
+                            ))
+                            lib_db.close()
+                            continue
+
+                        paths_to_refresh = existing_dirs
+                        logger.info(f"'{library.name}': 发现 {len(paths_to_refresh)} 个存在的目录需要刷新")
+
+                        # 2. 开始更新
+                        from src.core.index_manager import IndexManager
+                        library_index_manager = IndexManager(db_path=library.db_path)
+
+                        # 定义进度回调
+                        def progress_callback(current: int, total: int, current_file: str):
+                            """更新进度条和状态"""
+                            if total > 0:
+                                percentage = int((current / total) * 100)
+                                file_name = current_file.split('\\')[-1] if current_file else ""
+
+                                # 在主线程中更新对话框
+                                self.main_window.root.after(0, lambda: update_dialog.update_library_status(
+                                    library.name,
+                                    UpdateStatus.UPDATING,
+                                    progress=percentage,
+                                    current_file=file_name,
+                                    total_files=total,
+                                    processed_files=current
+                                ))
+
+                        # 使用 refresh_index 对所有文件进行检查
+                        stats = library_index_manager.refresh_index(
+                            paths=paths_to_refresh,
+                            progress_callback=progress_callback
                         )
-                        self.main_window.set_status("索引库为空")
-                        self.main_window.update_progress_bar(0)
 
-                    self.main_window.root.after(0, show_no_files)
-                    return
+                        # 累计统计
+                        total_stats.added_files += stats.added_files
+                        total_stats.updated_files += stats.updated_files
+                        total_stats.deleted_files += stats.deleted_files
+                        total_stats.failed_files += stats.failed_files
+                        total_stats.elapsed_time += stats.elapsed_time
 
-                # 提取所有唯一的根目录
-                import os
-                unique_dirs = set()
-                for row in rows:
-                    file_path = row['file_path']
-                    # 提取文件所在目录
-                    dir_path = os.path.dirname(file_path)
-                    # 尝试找到更高层的目录（简单方法：使用前几层）
-                    parts = dir_path.split(os.sep)
-                    if len(parts) > 3:
-                        # 使用前3层作为根目录（例如 E:\索引测试\2025年警示教育）
-                        root_dir = os.sep.join(parts[:4])
-                    else:
-                        root_dir = dir_path
-                    unique_dirs.add(root_dir)
+                        # 关闭数据库连接
+                        lib_db.close()
 
-                # 将目录集合转换为列表
-                paths_to_refresh = list(unique_dirs)
+                        # 3. 标记完成
+                        self.main_window.root.after(0, lambda lib=library, s=stats: update_dialog.update_library_status(
+                            lib.name,
+                            UpdateStatus.COMPLETED,
+                            progress=100,
+                            stats={
+                                'added': s.added_files,
+                                'updated': s.updated_files,
+                                'deleted': s.deleted_files
+                            }
+                        ))
 
-                logger.info(f"发现 {len(paths_to_refresh)} 个目录需要刷新: {paths_to_refresh}")
+                        logger.info(f"'{library.name}' 更新完成: 新增={stats.added_files}, 更新={stats.updated_files}, 删除={stats.deleted_files}")
 
-                # 使用 refresh_index 对所有文件进行检查
-                stats = self.index_manager.refresh_index(
-                    paths=paths_to_refresh,
-                    progress_callback=progress_callback
-                )
-
-                logger.info(f"Index update completed: {stats}")
+                    except Exception as e:
+                        logger.error(f"更新索引库 '{library.name}' 失败: {e}")
+                        self.main_window.root.after(0, lambda lib=library, err=str(e): update_dialog.update_library_status(
+                            lib.name,
+                            UpdateStatus.ERROR,
+                            error_message=err
+                        ))
+                        total_stats.failed_files += 1
+                        continue
 
                 # 在主线程中显示完成统计
                 def finish_update():
+                    update_dialog.mark_completed()
                     self.main_window.set_status(
-                        f"更新完成! "
-                        f"新增: {stats.added_files}, "
-                        f"更新: {stats.updated_files}, "
-                        f"删除: {stats.deleted_files}, "
-                        f"耗时: {stats.elapsed_time:.2f}秒"
+                        f"全部更新完成! "
+                        f"新增: {total_stats.added_files}, "
+                        f"更新: {total_stats.updated_files}, "
+                        f"标记删除: {total_stats.deleted_files}, "
+                        f"耗时: {total_stats.elapsed_time:.2f}秒"
                     )
-                    self.main_window.update_progress_bar(0)
 
-                    # 清除搜索缓存
+                    # 清除所有库的搜索缓存
                     if self.search_engine:
                         self.search_engine.clear_cache()
                         logger.info("搜索缓存已清除（增量更新后）")
@@ -410,11 +564,19 @@ class AppController:
             except Exception as e:
                 logger.error(f"Index update failed: {e}")
                 # 在主线程中显示错误
-                self.main_window.root.after(0, lambda: self._indexing_error(str(e)))
+                def show_error():
+                    update_dialog.mark_completed()
+                    self._indexing_error(str(e))
+                self.main_window.root.after(0, show_error)
 
         # 启动后台线程
         thread = threading.Thread(target=update_worker, daemon=True)
         thread.start()
+
+    def _on_update_dialog_close(self):
+        """更新对话框关闭回调"""
+        self.update_dialog = None
+        logger.info("Update dialog closed")
 
     def handle_settings(self):
         """
