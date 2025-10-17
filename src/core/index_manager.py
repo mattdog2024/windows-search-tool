@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 from typing import List, Dict, Callable, Optional, Tuple
 from dataclasses import dataclass, field
+from multiprocessing import Pool, cpu_count
 
 from ..data.db_manager import DBManager
 from ..parsers.factory import ParserFactory
@@ -32,6 +33,9 @@ class IndexStats:
         total_size: 文件总大小(字节)
         elapsed_time: 索引耗时(秒)
         errors: 错误列表 [(文件路径, 错误信息)]
+        added_files: 新增的文件数(增量索引)
+        updated_files: 更新的文件数(增量索引)
+        deleted_files: 删除的文件数(增量索引)
     """
     total_files: int = 0
     indexed_files: int = 0
@@ -40,6 +44,9 @@ class IndexStats:
     total_size: int = 0
     elapsed_time: float = 0.0
     errors: List[Tuple[str, str]] = field(default_factory=list)
+    added_files: int = 0
+    updated_files: int = 0
+    deleted_files: int = 0
 
 
 # 进度回调类型: (已处理数量, 总数量, 当前文件路径) -> None
@@ -98,6 +105,7 @@ class IndexManager:
         self.excluded_extensions = self.config.get('indexing.excluded_extensions', [])
         self.excluded_paths = self.config.get('indexing.excluded_paths', [])
         self.batch_size = self.config.get('indexing.batch_size', 100)
+        self.parallel_workers = self.config.get('indexing.parallel_workers', cpu_count())
 
         self._initialized = True
         logger.info(f"IndexManager 初始化完成, 数据库路径: {db_path}")
@@ -339,7 +347,9 @@ class IndexManager:
     def create_index(
         self,
         paths: List[str],
-        progress_callback: Optional[ProgressCallback] = None
+        progress_callback: Optional[ProgressCallback] = None,
+        use_parallel: bool = False,
+        num_workers: Optional[int] = None
     ) -> IndexStats:
         """
         创建完整索引
@@ -349,6 +359,8 @@ class IndexManager:
         Args:
             paths: 要索引的目录或文件路径列表
             progress_callback: 进度回调函数 (已处理数量, 总数量, 当前文件路径)
+            use_parallel: 是否使用多进程并行处理
+            num_workers: 工作进程数(仅在 use_parallel=True 时有效)
 
         Returns:
             IndexStats: 索引统计信息
@@ -357,9 +369,16 @@ class IndexManager:
             >>> def on_progress(processed, total, current):
             ...     print(f"进度: {processed}/{total} - {current}")
             >>> manager = IndexManager()
+            >>> # 串行索引
             >>> stats = manager.create_index(['E:/Documents'], on_progress)
+            >>> # 并行索引
+            >>> stats = manager.create_index(['E:/Documents'], on_progress, use_parallel=True)
             >>> print(f"索引完成: {stats.indexed_files}/{stats.total_files}")
         """
+        # 如果启用并行处理,委托给并行方法
+        if use_parallel:
+            return self.create_index_parallel(paths, num_workers, progress_callback)
+
         logger.info(f"开始创建索引: {len(paths)} 个路径")
         start_time = time.time()
         stats = IndexStats()
@@ -534,3 +553,224 @@ class IndexManager:
 
             logger.info(f"逐个插入完成: {success_count}/{len(documents)} 个文档")
             return success_count
+
+    # ==================== 多进程并行处理功能 ====================
+
+    def create_index_parallel(
+        self,
+        paths: List[str],
+        num_workers: Optional[int] = None,
+        progress_callback: Optional[ProgressCallback] = None
+    ) -> IndexStats:
+        """
+        使用多进程并行创建索引
+
+        扫描指定路径,使用多进程并行解析文件内容并批量插入数据库。
+
+        Args:
+            paths: 要索引的目录或文件路径列表
+            num_workers: 工作进程数,默认使用配置中的值或 CPU 核心数
+            progress_callback: 进度回调函数 (已处理数量, 总数量, 当前文件路径)
+
+        Returns:
+            IndexStats: 索引统计信息
+
+        Example:
+            >>> def on_progress(processed, total, current):
+            ...     print(f"进度: {processed}/{total} - {current}")
+            >>> manager = IndexManager()
+            >>> stats = manager.create_index_parallel(['E:/Documents'], num_workers=4, progress_callback=on_progress)
+            >>> print(f"索引完成: {stats.indexed_files}/{stats.total_files}")
+        """
+        logger.info(f"开始并行创建索引: {len(paths)} 个路径")
+        start_time = time.time()
+        stats = IndexStats()
+
+        # 确定工作进程数
+        if num_workers is None:
+            num_workers = self.parallel_workers
+
+        try:
+            # 1. 扫描文件列表
+            files = self.list_files(paths, recursive=True)
+            stats.total_files = len(files)
+
+            if stats.total_files == 0:
+                logger.warning("没有找到可索引的文件")
+                stats.elapsed_time = time.time() - start_time
+                return stats
+
+            logger.info(f"找到 {stats.total_files} 个文件待索引,使用 {num_workers} 个工作进程")
+
+            # 2. 使用多进程池并行解析文件
+            parse_results = []
+            processed_count = 0
+
+            with Pool(processes=num_workers) as pool:
+                # 提交所有解析任务
+                async_results = []
+                for file_info in files:
+                    async_result = pool.apply_async(_parse_file_worker, (file_info,))
+                    async_results.append((file_info, async_result))
+
+                # 收集解析结果
+                for file_info, async_result in async_results:
+                    try:
+                        # 等待解析完成(最多 30 秒)
+                        parse_result = async_result.get(timeout=30)
+
+                        if parse_result is not None:
+                            parse_results.append(parse_result)
+                            stats.total_size += file_info['size']
+                        else:
+                            # 解析失败
+                            stats.failed_files += 1
+                            stats.errors.append((file_info['path'], "解析返回 None"))
+
+                    except Exception as e:
+                        logger.error(f"获取解析结果失败: {file_info['path']}, 错误: {e}")
+                        stats.failed_files += 1
+                        stats.errors.append((file_info['path'], str(e)))
+
+                    processed_count += 1
+
+                    # 调用进度回调
+                    if progress_callback:
+                        progress_callback(processed_count, stats.total_files, file_info['path'])
+
+            # 3. 批量插入数据库
+            logger.info(f"并行解析完成,开始批量插入 {len(parse_results)} 个文档")
+
+            # 分批插入
+            batch_count = 0
+            for i in range(0, len(parse_results), self.batch_size):
+                batch = parse_results[i:i + self.batch_size]
+                inserted_count = self._batch_insert(batch)
+                stats.indexed_files += inserted_count
+                batch_count += 1
+
+            # 4. 更新统计信息
+            stats.elapsed_time = time.time() - start_time
+            stats.skipped_files = stats.total_files - stats.indexed_files - stats.failed_files
+
+            logger.info(
+                f"并行索引创建完成: 总计={stats.total_files}, "
+                f"成功={stats.indexed_files}, "
+                f"失败={stats.failed_files}, "
+                f"跳过={stats.skipped_files}, "
+                f"耗时={stats.elapsed_time:.2f}秒, "
+                f"速度={stats.indexed_files / (stats.elapsed_time / 60):.1f}文件/分钟"
+            )
+
+            return stats
+
+        except Exception as e:
+            logger.error(f"并行创建索引失败: {e}")
+            stats.elapsed_time = time.time() - start_time
+            raise
+
+    def _parse_files_parallel(
+        self,
+        files: List[Dict[str, any]],
+        num_workers: Optional[int] = None,
+        progress_callback: Optional[ProgressCallback] = None
+    ) -> List[Dict[str, any]]:
+        """
+        使用多进程并行解析文件列表
+
+        Args:
+            files: 文件信息列表
+            num_workers: 工作进程数
+            progress_callback: 进度回调函数
+
+        Returns:
+            解析后的文档数据列表
+        """
+        if num_workers is None:
+            num_workers = self.parallel_workers
+
+        parse_results = []
+        total = len(files)
+
+        with Pool(processes=num_workers) as pool:
+            # 提交所有解析任务
+            async_results = []
+            for file_info in files:
+                async_result = pool.apply_async(_parse_file_worker, (file_info,))
+                async_results.append((file_info, async_result))
+
+            # 收集解析结果
+            for i, (file_info, async_result) in enumerate(async_results, 1):
+                try:
+                    parse_result = async_result.get(timeout=30)
+
+                    if parse_result is not None:
+                        parse_results.append(parse_result)
+
+                    # 调用进度回调
+                    if progress_callback:
+                        progress_callback(i, total, file_info['path'])
+
+                except Exception as e:
+                    logger.error(f"并行解析失败: {file_info['path']}, 错误: {e}")
+
+        return parse_results
+
+
+# ==================== 全局工作函数(用于多进程) ====================
+
+def _parse_file_worker(file_info: Dict[str, any]) -> Optional[Dict[str, any]]:
+    """
+    多进程工作函数:解析单个文件
+
+    该函数必须在顶层定义以便 pickle 序列化(multiprocessing 要求)。
+
+    Args:
+        file_info: 文件信息字典,包含 path, size, modified, hash 等字段
+
+    Returns:
+        文档数据字典,如果解析失败则返回 None
+    """
+    file_path = file_info['path']
+
+    try:
+        # 导入必要的模块(在工作进程中)
+        from ..parsers.factory import ParserFactory
+
+        # 创建解析器工厂
+        factory = ParserFactory()
+
+        # 获取解析器
+        parser = factory.get_parser(file_path)
+        if parser is None:
+            return None
+
+        # 解析文件
+        result = parser.parse(file_path)
+
+        if not result.success:
+            return None
+
+        # 提取文件信息
+        _, ext = os.path.splitext(file_path)
+        file_name = os.path.basename(file_path)
+
+        # 构建文档数据
+        doc_data = {
+            'file_path': file_path,
+            'file_name': file_name,
+            'file_size': file_info['size'],
+            'file_type': ext.lstrip('.').lower() if ext else '',
+            'content_hash': file_info['hash'],
+            'created_at': None,
+            'modified_at': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(file_info['modified'])),
+            'content': result.content,
+            'metadata': result.metadata
+        }
+
+        return doc_data
+
+    except Exception as e:
+        # 工作进程中的错误
+        logger.error(f"工作进程解析失败: {file_path}, 错误: {e}")
+        return None
