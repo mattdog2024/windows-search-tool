@@ -97,8 +97,19 @@ class IndexManager:
 
         self.db = DBManager(db_path)
 
-        # 初始化解析器工厂
-        self.parser_factory = ParserFactory()
+        # 初始化解析器工厂(使用全局工厂实例)
+        from ..parsers.factory import get_parser_factory
+        from ..parsers.text_parser import TextParser
+
+        self.parser_factory = get_parser_factory()
+
+        # 确保注册基本解析器(文本解析器)
+        if not self.parser_factory.supports('test.txt'):
+            self.parser_factory.register_parser(
+                'text',
+                ['.txt', '.md', '.csv', '.log', '.json', '.xml'],
+                TextParser()
+            )
 
         # 从配置加载参数
         self.max_file_size = self.config.get('indexing.max_file_size_mb', 100) * 1024 * 1024
@@ -735,10 +746,16 @@ def _parse_file_worker(file_info: Dict[str, any]) -> Optional[Dict[str, any]]:
 
     try:
         # 导入必要的模块(在工作进程中)
-        from ..parsers.factory import ParserFactory
+        from ..parsers.factory import get_parser_factory
+        from ..parsers.text_parser import TextParser
 
-        # 创建解析器工厂
-        factory = ParserFactory()
+        # 获取全局解析器工厂(确保在工作进程中注册解析器)
+        factory = get_parser_factory()
+
+        # 检查是否已注册解析器,如果没有则注册
+        if not factory.supports(file_path):
+            # 在工作进程中注册基本解析器
+            factory.register_parser('text', ['.txt', '.md', '.csv', '.log', '.json', '.xml'], TextParser())
 
         # 获取解析器
         parser = factory.get_parser(file_path)
@@ -774,3 +791,287 @@ def _parse_file_worker(file_info: Dict[str, any]) -> Optional[Dict[str, any]]:
         # 工作进程中的错误
         logger.error(f"工作进程解析失败: {file_path}, 错误: {e}")
         return None
+
+
+# ==================== 增量索引扩展(IndexManager 类的方法) ====================
+# 注意:以下方法应该添加到 IndexManager 类中,这里作为模块级函数是为了便于 Stream 协调
+
+def _add_incremental_methods_to_index_manager():
+    """
+    将增量索引方法添加到 IndexManager 类
+
+    这个函数用于动态添加方法到 IndexManager 类,
+    以便与 Stream 4 的并行处理代码协调。
+    """
+
+    def refresh_index(
+        self,
+        paths: List[str],
+        progress_callback: Optional[ProgressCallback] = None
+    ) -> IndexStats:
+        """
+        增量更新索引
+
+        扫描指定路径,通过比较文件哈希值检测文件变更,
+        只索引新增和修改的文件,删除已不存在的文件。
+
+        Args:
+            paths: 要刷新索引的目录或文件路径列表
+            progress_callback: 进度回调函数 (已处理数量, 总数量, 当前文件路径)
+
+        Returns:
+            IndexStats: 索引统计信息,包含新增、更新和删除的文件数量
+
+        Example:
+            >>> def on_progress(processed, total, current):
+            ...     print(f"进度: {processed}/{total} - {current}")
+            >>> manager = IndexManager()
+            >>> stats = manager.refresh_index(['E:/Documents'], on_progress)
+            >>> print(f"新增: {stats.added_files}, 更新: {stats.updated_files}, 删除: {stats.deleted_files}")
+        """
+        logger.info(f"开始增量索引: {len(paths)} 个路径")
+        start_time = time.time()
+        stats = IndexStats()
+
+        try:
+            # 1. 获取数据库中所有已索引的文件路径和哈希值
+            db_files = self.db.get_all_file_paths()
+            db_files_dict = {path: self.db.get_file_hash(path) for path in db_files}
+            logger.info(f"数据库中已有 {len(db_files_dict)} 个文件")
+
+            # 2. 扫描当前文件系统
+            current_files = self.list_files(paths, recursive=True)
+            stats.total_files = len(current_files)
+            logger.info(f"当前文件系统中有 {stats.total_files} 个文件")
+
+            # 3. 检测文件变更
+            new_files, modified_files, deleted_file_paths = self._detect_changes(
+                db_files_dict,
+                current_files
+            )
+
+            logger.info(
+                f"变更检测完成: 新增={len(new_files)}, "
+                f"修改={len(modified_files)}, "
+                f"删除={len(deleted_file_paths)}"
+            )
+
+            # 4. 处理新增的文件
+            if new_files:
+                logger.info(f"开始索引 {len(new_files)} 个新增文件")
+                processed_count = 0
+                documents_batch = []
+
+                for file_info in new_files:
+                    # 解析文件
+                    parse_result = self._parse_file(file_info)
+
+                    if parse_result is None:
+                        stats.failed_files += 1
+                        processed_count += 1
+                        continue
+
+                    documents_batch.append(parse_result)
+                    stats.total_size += file_info['size']
+                    processed_count += 1
+
+                    # 调用进度回调
+                    if progress_callback:
+                        progress_callback(
+                            processed_count,
+                            len(new_files) + len(modified_files),
+                            file_info['path']
+                        )
+
+                    # 批量插入
+                    if len(documents_batch) >= self.batch_size:
+                        inserted_count = self._batch_insert(documents_batch)
+                        stats.added_files += inserted_count
+                        documents_batch.clear()
+
+                # 插入剩余的文档
+                if documents_batch:
+                    inserted_count = self._batch_insert(documents_batch)
+                    stats.added_files += inserted_count
+
+                logger.info(f"新增文件索引完成: {stats.added_files} 个")
+
+            # 5. 处理修改的文件
+            if modified_files:
+                logger.info(f"开始更新 {len(modified_files)} 个修改的文件")
+                processed_count = len(new_files)
+
+                for file_info in modified_files:
+                    # 解析文件
+                    parse_result = self._parse_file(file_info)
+
+                    if parse_result is None:
+                        stats.failed_files += 1
+                        processed_count += 1
+                        continue
+
+                    # 更新文档
+                    success = self._update_document(file_info, parse_result)
+                    if success:
+                        stats.updated_files += 1
+                        stats.total_size += file_info['size']
+                    else:
+                        stats.failed_files += 1
+
+                    processed_count += 1
+
+                    # 调用进度回调
+                    if progress_callback:
+                        progress_callback(
+                            processed_count,
+                            len(new_files) + len(modified_files),
+                            file_info['path']
+                        )
+
+                logger.info(f"修改文件更新完成: {stats.updated_files} 个")
+
+            # 6. 删除已删除文件的索引
+            if deleted_file_paths:
+                logger.info(f"开始删除 {len(deleted_file_paths)} 个已删除文件的索引")
+
+                for file_path in deleted_file_paths:
+                    success = self.db.delete_document_by_path(file_path, hard_delete=True)
+                    if success:
+                        stats.deleted_files += 1
+
+                logger.info(f"删除文件索引完成: {stats.deleted_files} 个")
+
+            # 7. 更新统计信息
+            stats.indexed_files = stats.added_files + stats.updated_files
+            stats.elapsed_time = time.time() - start_time
+
+            logger.info(
+                f"增量索引完成: "
+                f"新增={stats.added_files}, "
+                f"更新={stats.updated_files}, "
+                f"删除={stats.deleted_files}, "
+                f"失败={stats.failed_files}, "
+                f"耗时={stats.elapsed_time:.2f}秒"
+            )
+
+            return stats
+
+        except Exception as e:
+            logger.error(f"增量索引失败: {e}")
+            stats.elapsed_time = time.time() - start_time
+            raise
+
+    def _detect_changes(
+        self,
+        db_files_dict: Dict[str, str],
+        current_files: List[Dict[str, any]]
+    ) -> Tuple[List[Dict[str, any]], List[Dict[str, any]], List[str]]:
+        """
+        检测文件变更
+
+        比较数据库中的文件和当前文件系统中的文件,
+        检测新增、修改和删除的文件。
+
+        Args:
+            db_files_dict: 数据库中的文件字典 {文件路径: 哈希值}
+            current_files: 当前文件系统中的文件列表
+
+        Returns:
+            (new_files, modified_files, deleted_file_paths):
+            - new_files: 新增的文件列表
+            - modified_files: 修改的文件列表
+            - deleted_file_paths: 已删除的文件路径列表
+        """
+        new_files = []
+        modified_files = []
+        current_file_paths = set()
+
+        # 遍历当前文件,检测新增和修改
+        for file_info in current_files:
+            file_path = file_info['path']
+            file_hash = file_info['hash']
+            current_file_paths.add(file_path)
+
+            if file_path not in db_files_dict:
+                # 新增的文件
+                new_files.append(file_info)
+                logger.debug(f"检测到新增文件: {file_path}")
+            else:
+                # 检查哈希值是否变化
+                db_hash = db_files_dict[file_path]
+                if db_hash != file_hash:
+                    # 修改的文件
+                    modified_files.append(file_info)
+                    logger.debug(f"检测到修改文件: {file_path}")
+                else:
+                    # 文件未变化
+                    logger.debug(f"文件未变化: {file_path}")
+
+        # 检测已删除的文件
+        db_file_paths = set(db_files_dict.keys())
+        deleted_file_paths = list(db_file_paths - current_file_paths)
+
+        for file_path in deleted_file_paths:
+            logger.debug(f"检测到删除文件: {file_path}")
+
+        return new_files, modified_files, deleted_file_paths
+
+    def _update_document(
+        self,
+        file_info: Dict[str, any],
+        doc_data: Dict[str, any]
+    ) -> bool:
+        """
+        更新文档
+
+        更新数据库中已有文档的内容、哈希值和修改时间。
+
+        Args:
+            file_info: 文件信息字典,包含 path, size, modified, hash 等字段
+            doc_data: 文档数据字典,包含解析后的内容和元数据
+
+        Returns:
+            是否更新成功
+        """
+        file_path = file_info['path']
+
+        try:
+            # 获取文档 ID
+            doc = self.db.get_document_by_path(file_path)
+            if not doc:
+                logger.warning(f"文档不存在,无法更新: {file_path}")
+                return False
+
+            doc_id = doc['id']
+
+            # 更新文档
+            success = self.db.update_document(
+                document_id=doc_id,
+                content=doc_data['content'],
+                file_size=doc_data['file_size'],
+                file_type=doc_data['file_type'],
+                content_hash=doc_data['content_hash'],
+                modified_at=doc_data['modified_at'],
+                status='active',
+                metadata=doc_data.get('metadata')
+            )
+
+            if success:
+                logger.debug(f"文档更新成功: {file_path}")
+            else:
+                logger.warning(f"文档更新失败: {file_path}")
+
+            return success
+
+        except Exception as e:
+            logger.error(f"更新文档异常: {file_path}, 错误: {e}")
+            return False
+
+    # 将方法添加到 IndexManager 类
+    IndexManager.refresh_index = refresh_index
+    IndexManager._detect_changes = _detect_changes
+    IndexManager._update_document = _update_document
+
+
+# 自动执行方法注册
+_add_incremental_methods_to_index_manager()
