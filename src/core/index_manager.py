@@ -99,16 +99,52 @@ class IndexManager:
         # 初始化解析器工厂(使用全局工厂实例)
         from ..parsers.factory import get_parser_factory
         from ..parsers.text_parser import TextParser
+        from ..parsers.office_parsers import DocxParser, XlsxParser, PptxParser
+        from ..parsers.pdf_parser import PdfParser
 
         self.parser_factory = get_parser_factory()
 
-        # 确保注册基本解析器(文本解析器)
+        # 注册所有解析器
+        # 文本解析器
         if not self.parser_factory.supports('test.txt'):
             self.parser_factory.register_parser(
                 'text',
-                ['.txt', '.md', '.csv', '.log', '.json', '.xml'],
+                ['.txt', '.md', '.csv', '.log', '.json', '.xml', '.py', '.java', '.cpp', '.h'],
                 TextParser()
             )
+
+        # Office 解析器
+        if not self.parser_factory.supports('test.docx'):
+            self.parser_factory.register_parser(
+                'docx',
+                ['.docx', '.doc'],
+                DocxParser()
+            )
+
+        if not self.parser_factory.supports('test.xlsx'):
+            self.parser_factory.register_parser(
+                'xlsx',
+                ['.xlsx', '.xls'],
+                XlsxParser()
+            )
+
+        if not self.parser_factory.supports('test.pptx'):
+            self.parser_factory.register_parser(
+                'pptx',
+                ['.pptx', '.ppt'],
+                PptxParser()
+            )
+
+        # PDF 解析器
+        if not self.parser_factory.supports('test.pdf'):
+            self.parser_factory.register_parser(
+                'pdf',
+                ['.pdf'],
+                PdfParser()
+            )
+
+        logger.info(f"已注册解析器: {self.parser_factory.get_parser_names()}")
+        logger.info(f"支持的文件格式: {self.parser_factory.get_supported_extensions()}")
 
         # 从配置加载参数
         self.max_file_size = self.config.get('indexing.max_file_size_mb', 100) * 1024 * 1024
@@ -747,14 +783,23 @@ def _parse_file_worker(file_info: Dict[str, any]) -> Optional[Dict[str, any]]:
         # 导入必要的模块(在工作进程中)
         from ..parsers.factory import get_parser_factory
         from ..parsers.text_parser import TextParser
+        from ..parsers.office_parsers import DocxParser, XlsxParser, PptxParser
+        from ..parsers.pdf_parser import PdfParser
 
         # 获取全局解析器工厂(确保在工作进程中注册解析器)
         factory = get_parser_factory()
 
-        # 检查是否已注册解析器,如果没有则注册
-        if not factory.supports(file_path):
-            # 在工作进程中注册基本解析器
+        # 在工作进程中注册所有解析器(如果尚未注册)
+        if not factory.supports('test.txt'):
             factory.register_parser('text', ['.txt', '.md', '.csv', '.log', '.json', '.xml'], TextParser())
+        if not factory.supports('test.docx'):
+            factory.register_parser('docx', ['.docx', '.doc'], DocxParser())
+        if not factory.supports('test.xlsx'):
+            factory.register_parser('xlsx', ['.xlsx', '.xls'], XlsxParser())
+        if not factory.supports('test.pptx'):
+            factory.register_parser('pptx', ['.pptx', '.ppt'], PptxParser())
+        if not factory.supports('test.pdf'):
+            factory.register_parser('pdf', ['.pdf'], PdfParser())
 
         # 获取解析器
         parser = factory.get_parser(file_path)

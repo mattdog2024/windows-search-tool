@@ -22,27 +22,6 @@ class TestAdvancedSearch:
     """高级搜索功能测试"""
 
     @pytest.fixture
-    def db_manager(self):
-        """创建临时数据库用于测试"""
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.db') as f:
-            db_path = f.name
-
-        db = DBManager(db_path)
-        db.connect()
-        db.initialize_schema()
-
-        yield db
-
-        db.close()
-        if os.path.exists(db_path):
-            os.remove(db_path)
-
-    @pytest.fixture
-    def search_engine(self, db_manager):
-        """创建搜索引擎实例"""
-        return SearchEngine(db_manager)
-
-    @pytest.fixture
     def sample_documents(self, db_manager):
         """创建测试文档"""
         # 创建不同日期和大小的文档
@@ -209,27 +188,6 @@ class TestSearchSuggestions:
     """搜索建议功能测试"""
 
     @pytest.fixture
-    def db_manager(self):
-        """创建临时数据库用于测试"""
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.db') as f:
-            db_path = f.name
-
-        db = DBManager(db_path)
-        db.connect()
-        db.initialize_schema()
-
-        yield db
-
-        db.close()
-        if os.path.exists(db_path):
-            os.remove(db_path)
-
-    @pytest.fixture
-    def search_engine(self, db_manager):
-        """创建搜索引擎实例"""
-        return SearchEngine(db_manager)
-
-    @pytest.fixture
     def sample_documents(self, db_manager):
         """创建测试文档"""
         documents = [
@@ -297,27 +255,6 @@ class TestSearchSuggestions:
 
 class TestSearchStats:
     """搜索统计功能测试"""
-
-    @pytest.fixture
-    def db_manager(self):
-        """创建临时数据库用于测试"""
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.db') as f:
-            db_path = f.name
-
-        db = DBManager(db_path)
-        db.connect()
-        db.initialize_schema()
-
-        yield db
-
-        db.close()
-        if os.path.exists(db_path):
-            os.remove(db_path)
-
-    @pytest.fixture
-    def search_engine(self, db_manager):
-        """创建搜索引擎实例"""
-        return SearchEngine(db_manager)
 
     @pytest.fixture
     def sample_documents(self, db_manager):

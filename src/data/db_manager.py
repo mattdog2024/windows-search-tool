@@ -364,11 +364,36 @@ class DBManager:
 
     # ==================== CRUD 操作 ====================
 
+    def add_document(
+        self,
+        file_path: str,
+        file_name: str,
+        content: str = "",
+        file_size: Optional[int] = None,
+        file_type: Optional[str] = None,
+        content_hash: Optional[str] = None,
+        created_at: Optional[str] = None,
+        modified_at: Optional[str] = None,
+        metadata: Optional[dict[str, Any]] = None
+    ) -> int:
+        """add_document 是 insert_document 的别名"""
+        return self.insert_document(
+            file_path=file_path,
+            file_name=file_name,
+            content=content,
+            file_size=file_size,
+            file_type=file_type,
+            content_hash=content_hash,
+            created_at=created_at,
+            modified_at=modified_at,
+            metadata=metadata
+        )
+
     def insert_document(
         self,
         file_path: str,
         file_name: str,
-        content: str,
+        content: str = "",
         file_size: Optional[int] = None,
         file_type: Optional[str] = None,
         content_hash: Optional[str] = None,
@@ -382,7 +407,7 @@ class DBManager:
         Args:
             file_path: 文件路径 (必须唯一)
             file_name: 文件名
-            content: 文档内容 (用于全文搜索)
+            content: 文档内容 (用于全文搜索)，默认为空
             file_size: 文件大小 (字节)
             file_type: 文件类型/扩展名
             content_hash: 内容哈希值
@@ -426,11 +451,12 @@ class DBManager:
 
             doc_id = cursor.lastrowid
 
-            # 插入全文搜索内容
-            cursor.execute("""
-                INSERT INTO documents_fts (rowid, content)
-                VALUES (?, ?)
-            """, (doc_id, content))
+            # 插入全文搜索内容 (如果提供了content)
+            if content:
+                cursor.execute("""
+                    INSERT INTO documents_fts (rowid, content)
+                    VALUES (?, ?)
+                """, (doc_id, content))
 
             # 插入元数据
             if metadata:
@@ -1031,6 +1057,136 @@ class DBManager:
         except sqlite3.Error as e:
             logger.error(f"内容搜索失败: {e}")
             raise
+
+    def search_like(
+        self,
+        query: str,
+        limit: int = 20,
+        offset: int = 0,
+        file_types: Optional[list[str]] = None
+    ) -> list[dict[str, Any]]:
+        """
+        使用 LIKE 搜索文档内容(支持中文搜索)
+
+        由于 FTS5 对中文分词支持不好,这个方法使用 LIKE 查询直接在 content 列上搜索,
+        可以很好地支持中文内容搜索。
+
+        Args:
+            query: 搜索查询字符串
+            limit: 返回结果数量限制,默认 20
+            offset: 结果偏移量,用于分页,默认 0
+            file_types: 可选的文件类型过滤列表,如 ['txt', 'pdf']
+
+        Returns:
+            list[dict]: 搜索结果列表,每个结果包含:
+                - id: 文档 ID
+                - file_path: 文件路径
+                - file_name: 文件名
+                - file_type: 文件类型
+                - file_size: 文件大小
+                - modified_at: 修改时间
+                - snippet: 搜索结果摘要
+                - rank: 固定为 0(LIKE 搜索没有相关度排序)
+
+        Example:
+            >>> results = db.search_like("带钢", limit=10)
+            >>> for result in results:
+            ...     print(f"{result['file_name']}: {result['snippet']}")
+        """
+        cursor = self.connection.cursor()
+
+        try:
+            # 构建查询语句
+            base_query = """
+                SELECT
+                    d.id,
+                    d.file_path,
+                    d.file_name,
+                    d.file_type,
+                    d.file_size,
+                    d.modified_at,
+                    fts.content
+                FROM documents_fts fts
+                JOIN documents d ON fts.rowid = d.id
+                WHERE fts.content LIKE ?
+                  AND d.status = 'active'
+            """
+
+            # 添加文件类型过滤
+            params = [f'%{query}%']
+            if file_types:
+                placeholders = ','.join(['?' for _ in file_types])
+                base_query += f" AND d.file_type IN ({placeholders})"
+                params.extend(file_types)
+
+            # 添加排序和分页
+            base_query += " ORDER BY d.modified_at DESC LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
+
+            cursor.execute(base_query, params)
+
+            results = []
+            for row in cursor.fetchall():
+                # 生成包含关键词的摘要片段
+                content = row['content'] if row['content'] else ''
+                snippet = self._generate_snippet(content, query)
+
+                results.append({
+                    'id': row['id'],
+                    'file_path': row['file_path'],
+                    'file_name': row['file_name'],
+                    'file_type': row['file_type'],
+                    'file_size': row['file_size'],
+                    'modified_at': row['modified_at'],
+                    'snippet': snippet,
+                    'rank': 0  # LIKE 搜索没有 rank
+                })
+
+            logger.info(f"LIKE 搜索完成: 查询='{query}', 结果数={len(results)}")
+            return results
+
+        except sqlite3.Error as e:
+            logger.error(f"LIKE 搜索失败: {e}")
+            raise
+
+    def _generate_snippet(self, content: str, query: str, max_length: int = 150) -> str:
+        """
+        从内容中生成包含查询关键词的摘要片段
+
+        Args:
+            content: 完整内容
+            query: 查询关键词
+            max_length: 摘要最大长度
+
+        Returns:
+            str: 摘要片段,包含 <mark> 标签高亮关键词
+        """
+        if not content or not query:
+            return ""
+
+        # 查找关键词位置
+        idx = content.find(query)
+        if idx == -1:
+            # 如果找不到,返回开头部分
+            snippet = content[:max_length]
+            return snippet + ('...' if len(content) > max_length else '')
+
+        # 提取关键词前后的文本
+        start = max(0, idx - max_length // 2)
+        end = min(len(content), idx + len(query) + max_length // 2)
+
+        snippet = content[start:end]
+
+        # 添加省略号
+        if start > 0:
+            snippet = '...' + snippet
+        if end < len(content):
+            snippet = snippet + '...'
+
+        # 高亮关键词
+        snippet = snippet.replace(query, f'<mark>{query}</mark>')
+
+        return snippet
 
     def get_statistics(self) -> dict[str, Any]:
         """

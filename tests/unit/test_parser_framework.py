@@ -8,9 +8,9 @@ import tempfile
 from src.parsers.base import (
     ParseResult,
     IDocumentParser,
-    ParserFactory,
     BaseParser
 )
+from src.parsers.factory import ParserFactory
 from src.parsers.text_parser import TextParser
 
 

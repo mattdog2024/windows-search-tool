@@ -11,10 +11,8 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from src.utils.config import init_config, get_config
-from src.utils.logger import init_logger_from_config, get_logger
-from src.parsers.base import get_parser_factory
-from src.parsers.text_parser import TextParser
+from src.utils.config import init_config
+from src.utils.logger import init_logger_from_config
 
 
 def init_application():
@@ -26,15 +24,8 @@ def init_application():
     logger = init_logger_from_config(config)
     logger.info('=' * 50)
     logger.info('Windows Search Tool 启动中...')
-    logger.info(f'版本: {config.get("app.version")}')
+    logger.info(f'版本: {config.get("app.version", "0.1.0")}')
     logger.info('=' * 50)
-
-    # 注册解析器
-    factory = get_parser_factory()
-    text_parser = TextParser()
-    factory.register_parser('text', ['.txt', '.md', '.csv', '.log'], text_parser)
-    logger.info(f'已注册解析器: {factory.get_parser_names()}')
-    logger.info(f'支持的文件类型: {factory.get_supported_extensions()}')
 
     return config, logger
 
@@ -45,34 +36,30 @@ def main():
         config, logger = init_application()
 
         logger.info('应用程序初始化完成')
-        logger.info('目前处于开发阶段，GUI 界面尚未实现')
-        logger.info('核心框架已就绪:')
-        logger.info('  ✓ 配置管理模块')
-        logger.info('  ✓ 日志模块')
+        logger.info('核心功能已就绪:')
         logger.info('  ✓ 文档解析框架')
-        logger.info('  ✓ 文本文件解析器')
+        logger.info('  ✓ 数据库和索引管理')
+        logger.info('  ✓ 搜索引擎')
+        logger.info('  ✓ AI 语义搜索')
+        logger.info('  ✓ 文档智能摘要')
+        logger.info('  ✓ GUI 界面')
 
-        # 演示解析器工厂
-        factory = get_parser_factory()
-        logger.info(f'\n支持的文件格式:')
-        for ext in factory.get_supported_extensions():
-            logger.info(f'  - {ext}')
+        # 启动 GUI 应用
+        logger.info('\n启动图形界面...')
 
-        logger.info('\n下一步开发计划:')
-        logger.info('  1. 实现 Office 文档解析器 (Word, Excel, PowerPoint)')
-        logger.info('  2. 实现 PDF 解析器和 OCR 功能')
-        logger.info('  3. 构建 SQLite FTS5 数据库')
-        logger.info('  4. 开发 GUI 界面')
+        from src.ui.app_controller import AppController
 
-        logger.info('\n按 Ctrl+C 退出...')
+        # 获取数据库路径
+        db_path = config.get('database.path', 'search_index.db')
 
-        # 保持程序运行
-        import time
-        while True:
-            time.sleep(1)
+        # 创建并运行应用控制器
+        app = AppController(db_path=db_path)
+        app.run()
+
+        logger.info('\n应用程序正常退出')
 
     except KeyboardInterrupt:
-        logger.info('\n\n应用程序正常退出')
+        logger.info('\n\n应用程序被用户中断')
     except Exception as e:
         logger.exception(f'应用程序发生错误: {e}')
         return 1

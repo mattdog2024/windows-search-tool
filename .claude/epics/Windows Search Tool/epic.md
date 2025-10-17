@@ -1,8 +1,8 @@
 ---
 name: Windows Search Tool
-status: backlog
+status: in-progress
 created: 2025-10-16T08:13:40Z
-progress: 0%
+progress: 10%
 prd: .claude/prds/Windows Search Tool.md
 github: https://github.com/mattdog2024/windows-search-tool/issues/1
 ---

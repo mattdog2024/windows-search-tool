@@ -208,25 +208,39 @@ class SearchEngine:
 
         self._cache_misses += 1
 
-        # 构建 FTS5 查询
-        fts_query = self._build_fts_query(query, mode)
+        # 检查是否包含中文字符,如果是则使用 LIKE 搜索
+        has_chinese = self._has_chinese(query)
 
-        logger.info(f"执行搜索: query='{query}', mode={mode}, limit={limit}, offset={offset}")
+        logger.info(f"执行搜索: query='{query}', mode={mode}, has_chinese={has_chinese}, limit={limit}, offset={offset}")
 
         try:
-            # 使用 DBManager 的 search_fts 方法执行搜索
-            raw_results = self.db_manager.search_fts(
-                query=fts_query,
-                limit=limit,
-                offset=offset,
-                file_types=file_types
-            )
+            if has_chinese:
+                # 中文搜索使用 LIKE
+                raw_results = self.db_manager.search_like(
+                    query=query,
+                    limit=limit,
+                    offset=offset,
+                    file_types=file_types
+                )
+            else:
+                # 英文搜索使用 FTS
+                fts_query = self._build_fts_query(query, mode)
+                raw_results = self.db_manager.search_fts(
+                    query=fts_query,
+                    limit=limit,
+                    offset=offset,
+                    file_types=file_types
+                )
 
             # 转换为 SearchResult 对象
             results = self._convert_to_search_results(raw_results)
 
             # 获取总结果数(无分页限制)
-            total = self._count_total_results(fts_query, file_types)
+            if has_chinese:
+                total = self._count_total_results_like(query, file_types)
+            else:
+                fts_query = self._build_fts_query(query, mode)
+                total = self._count_total_results(fts_query, file_types)
 
             # 计算总页数和分页信息
             page = (offset // limit) + 1
@@ -361,6 +375,21 @@ class SearchEngine:
 
         return search_results
 
+    def _has_chinese(self, text: str) -> bool:
+        """
+        检查文本是否包含中文字符
+
+        Args:
+            text: 要检查的文本
+
+        Returns:
+            bool: 如果包含中文字符返回 True,否则返回 False
+        """
+        for char in text:
+            if '\u4e00' <= char <= '\u9fff':
+                return True
+        return False
+
     def _count_total_results(
         self,
         fts_query: str,
@@ -403,6 +432,50 @@ class SearchEngine:
 
         except Exception as e:
             logger.error(f"统计结果总数失败: {e}")
+            return 0
+
+    def _count_total_results_like(
+        self,
+        search_query: str,
+        file_types: Optional[List[str]] = None
+    ) -> int:
+        """
+        统计 LIKE 搜索结果总数
+
+        Args:
+            search_query: 搜索查询字符串
+            file_types: 可选的文件类型过滤列表
+
+        Returns:
+            int: 搜索结果总数
+        """
+        cursor = self.db_manager.connection.cursor()
+
+        try:
+            # 构建 COUNT 查询
+            query = """
+                SELECT COUNT(*) as count
+                FROM documents_fts fts
+                JOIN documents d ON fts.rowid = d.id
+                WHERE fts.content LIKE ?
+                  AND d.status = 'active'
+            """
+
+            params = [f'%{search_query}%']
+
+            # 添加文件类型过滤
+            if file_types:
+                placeholders = ','.join(['?' for _ in file_types])
+                query += f" AND d.file_type IN ({placeholders})"
+                params.extend(file_types)
+
+            cursor.execute(query, params)
+            result = cursor.fetchone()
+
+            return result['count'] if result else 0
+
+        except Exception as e:
+            logger.error(f"统计 LIKE 结果总数失败: {e}")
             return 0
 
     # ==================== 缓存管理方法 ====================

@@ -144,3 +144,33 @@ class ConfigManager:
                 config[k] = {}
             config = config[k]
         config[keys[-1]] = value
+
+
+# 全局配置实例
+_config_instance = None
+
+
+def init_config() -> ConfigManager:
+    """
+    初始化全局配置管理器
+
+    Returns:
+        ConfigManager 实例
+    """
+    global _config_instance
+    if _config_instance is None:
+        _config_instance = ConfigManager()
+    return _config_instance
+
+
+def get_config() -> ConfigManager:
+    """
+    获取全局配置管理器实例
+
+    Returns:
+        ConfigManager 实例
+    """
+    global _config_instance
+    if _config_instance is None:
+        _config_instance = ConfigManager()
+    return _config_instance

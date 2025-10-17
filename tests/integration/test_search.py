@@ -36,9 +36,7 @@ class TestSearchIntegration:
     @pytest.fixture(scope='class')
     def db_manager(self, test_db_path):
         """创建数据库管理器"""
-        db = DBManager(test_db_path)
-        db.connect()
-        db.initialize_schema()
+        db = DBManager(test_db_path)  # 自动初始化
 
         yield db
 
