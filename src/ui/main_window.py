@@ -30,6 +30,7 @@ class MainWindow:
 
     def __init__(
         self,
+        library_manager=None,
         title: str = "Windows Search Tool",
         width: int = 900,
         height: int = 600
@@ -38,6 +39,7 @@ class MainWindow:
         初始化主窗口
 
         Args:
+            library_manager: 索引库管理器实例
             title: 窗口标题
             width: 窗口宽度
             height: 窗口高度
@@ -49,9 +51,13 @@ class MainWindow:
         # 设置最小窗口大小
         self.root.minsize(800, 500)
 
+        # 索引库管理器
+        self.library_manager = library_manager
+
         # 回调函数
         self.on_search_callback: Optional[Callable] = None
         self.on_index_callback: Optional[Callable] = None
+        self.on_update_index_callback: Optional[Callable] = None  # 增量更新回调
         self.on_settings_callback: Optional[Callable] = None
         self.on_new_index_callback: Optional[Callable] = None
         self.on_open_index_callback: Optional[Callable] = None
@@ -69,6 +75,7 @@ class MainWindow:
         self.preview_text: Optional[tk.Text] = None  # 预览文本框
         self.preview_info_label: Optional[ttk.Label] = None  # 预览信息标签
         self.preview_panel: Optional[ttk.Frame] = None  # 预览面板
+        self.library_selector = None  # 索引库选择器
 
         # 数据库管理器引用(用于从数据库读取内容)
         self._db_manager_ref = None
@@ -195,6 +202,16 @@ class MainWindow:
 
     def _create_search_area_in_frame(self, parent):
         """在指定父框架中创建搜索区域"""
+        # 索引库选择器（在搜索框上方）
+        if self.library_manager:
+            from src.ui.index_library_selector import IndexLibrarySelector
+            self.library_selector = IndexLibrarySelector(
+                parent,
+                self.library_manager,
+                on_selection_changed=self._on_library_selection_changed
+            )
+            self.library_selector.pack(side=tk.TOP, fill=tk.X, padx=10, pady=(5, 0))
+
         search_frame = ttk.Frame(parent)
         search_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=5)
 
@@ -259,8 +276,8 @@ class MainWindow:
         tree_frame = ttk.Frame(left_frame)
         tree_frame.pack(fill=tk.BOTH, expand=True)
 
-        # 创建 Treeview
-        columns = ("文件名", "路径", "大小", "修改时间", "相似度")
+        # 创建 Treeview（添加"索引库"列）
+        columns = ("文件名", "路径", "索引库", "大小", "修改时间", "相似度")
         self.results_tree = ttk.Treeview(
             tree_frame,
             columns=columns,
@@ -276,7 +293,8 @@ class MainWindow:
             self.results_tree.heading(col, text=col)
 
         self.results_tree.column("文件名", width=200)
-        self.results_tree.column("路径", width=300)
+        self.results_tree.column("路径", width=250)
+        self.results_tree.column("索引库", width=100)
         self.results_tree.column("大小", width=80)
         self.results_tree.column("修改时间", width=120)
         self.results_tree.column("相似度", width=80)
@@ -343,7 +361,6 @@ class MainWindow:
             preview_text_frame,
             wrap=tk.WORD,
             font=("Consolas", 9),
-            state=tk.DISABLED,
             bg="#f8f8f8"
         )
 
@@ -360,6 +377,34 @@ class MainWindow:
         # 配置文本高亮标签
         self.preview_text.tag_config("keyword", background="#ffff00", foreground="#000000")
         self.preview_text.tag_config("keyword_alt", background="#ffcccc", foreground="#000000")
+
+        # 创建预览文本的右键菜单
+        self.preview_context_menu = tk.Menu(self.root, tearoff=0)
+        self.preview_context_menu.add_command(label="复制", command=self._copy_preview_text)
+        self.preview_context_menu.add_command(label="全选", command=self._select_all_preview)
+
+        # 绑定右键菜单
+        self.preview_text.bind('<Button-3>', self._show_preview_context_menu)
+
+        # 绑定快捷键用于复制和全选
+        self.preview_text.bind('<Control-c>', lambda e: self._handle_preview_copy())
+        self.preview_text.bind('<Control-a>', lambda e: self._handle_preview_select_all())
+
+        # 禁用所有其他键盘输入（保护只读状态）
+        def block_edit(event):
+            # 允许的操作：Ctrl+C, Ctrl+A, 方向键, Home, End, PageUp, PageDown
+            allowed_keys = ('Left', 'Right', 'Up', 'Down', 'Home', 'End', 'Prior', 'Next')
+            # 检查是否是 Ctrl+C 或 Ctrl+A
+            if event.state & 0x4:  # Ctrl 键按下
+                if event.keysym in ('c', 'C', 'a', 'A'):
+                    return  # 允许
+            # 允许方向键等导航键
+            if event.keysym in allowed_keys:
+                return
+            # 阻止其他所有键
+            return 'break'
+
+        self.preview_text.bind('<Key>', block_edit)
 
         # 存储预览文本组件的引用
         self.preview_panel = right_frame
@@ -419,7 +464,8 @@ class MainWindow:
 
         # 文件操作
         self.root.bind('<Return>', lambda e: self._open_selected_file())
-        self.root.bind('<Control-c>', lambda e: self._copy_path())
+        # Ctrl+C 只在结果树有焦点时复制路径
+        self.root.bind('<Control-c>', lambda e: self._copy_path() if self.root.focus_get() == self.results_tree else None)
         self.root.bind('<Control-d>', lambda e: self._add_to_favorites())
 
     def _update_search_history_dropdown(self):
@@ -427,6 +473,14 @@ class MainWindow:
         recent = self.search_history.get_recent_searches(limit=20)
         queries = [item['query'] for item in recent]
         self.search_entry['values'] = queries
+
+    def _on_library_selection_changed(self):
+        """当索引库选择变化时的回调"""
+        logger.info("Library selection changed")
+        # 清除当前搜索结果（因为搜索范围变化了）
+        self.clear_results()
+        self._clear_preview()
+        self.set_status(f"搜索范围已更新: {self.library_manager.get_selection_summary()}")
 
     def _on_search_key_release(self, event):
         """搜索框按键释放事件 - 提供自动完成建议"""
@@ -465,6 +519,10 @@ class MainWindow:
     def set_index_callback(self, callback: Callable):
         """设置索引回调"""
         self.on_index_callback = callback
+
+    def set_update_index_callback(self, callback: Callable):
+        """设置更新索引回调"""
+        self.on_update_index_callback = callback
 
     def set_settings_callback(self, callback: Callable):
         """设置配置回调"""
@@ -576,15 +634,28 @@ class MainWindow:
                 self.set_status("索引功能未实现")
 
     def _update_index(self):
-        """更新索引"""
-        response = messagebox.askyesno("确认", "是否更新索引?")
+        """更新索引（增量更新）"""
+        # 获取当前索引的所有目录
+        response = messagebox.askyesno(
+            "确认更新索引",
+            "是否对当前索引库进行增量更新？\n\n"
+            "增量更新会检测文件变化：\n"
+            "- 添加新文件\n"
+            "- 更新已修改的文件\n"
+            "- 移除已删除的文件"
+        )
 
-        if response and self.on_index_callback:
-            self.set_status("正在更新索引...")
-            self.progress_bar.start()
-            # TODO: 实现增量更新
-            self.progress_bar.stop()
-            self.set_status("索引更新完成")
+        if response:
+            # 调用更新索引回调（需要添加新的回调）
+            if hasattr(self, 'on_update_index_callback') and self.on_update_index_callback:
+                self.on_update_index_callback()
+            else:
+                # 兼容旧的实现：使用 on_index_callback
+                messagebox.showinfo(
+                    "提示",
+                    "增量更新功能需要配置更新回调。\n"
+                    "请使用 '添加目录' 功能重新索引。"
+                )
 
     def _new_index(self):
         """新建索引"""
@@ -846,33 +917,45 @@ class MainWindow:
                 """, (doc_id,))
                 result = cursor.fetchone()
                 if result and result['content']:
-                    return result['content']
+                    content = result['content']
+                    # 限制预览大小
+                    if len(content) > 50000:  # 50KB
+                        content = content[:50000] + "\n\n... [内容过长,已截断,仅显示前50000字符]"
+                    return content
             except Exception as e:
                 logger.warning(f"Failed to read from database: {e}")
 
-        # 尝试从文件系统读取
-        try:
-            file_path_obj = Path(file_path)
-            if not file_path_obj.exists():
-                return None
+        # 如果数据库读取失败，只对纯文本文件尝试从文件系统读取
+        file_path_obj = Path(file_path)
+        if not file_path_obj.exists():
+            return "[文件不存在]"
 
+        # 检查文件扩展名,只对纯文本文件尝试读取
+        file_ext = file_path_obj.suffix.lower()
+        text_extensions = {'.txt', '.log', '.md', '.py', '.js', '.java', '.cpp', '.h', '.cs', '.xml', '.json', '.yml', '.yaml', '.ini', '.cfg', '.conf'}
+
+        if file_ext not in text_extensions:
+            return f"[{file_ext} 文件不支持直接预览,请从数据库查看提取的文本内容]"
+
+        # 尝试从文件系统读取纯文本文件
+        try:
             # 尝试多种编码
             for encoding in ['utf-8', 'gbk', 'gb2312', 'latin-1']:
                 try:
                     with open(file_path_obj, 'r', encoding=encoding) as f:
                         content = f.read()
                         # 限制预览大小
-                        if len(content) > 100000:  # 100KB
-                            content = content[:100000] + "\n\n... [内容过长,已截断]"
+                        if len(content) > 50000:  # 50KB
+                            content = content[:50000] + "\n\n... [内容过长,已截断,仅显示前50000字符]"
                         return content
                 except (UnicodeDecodeError, UnicodeError):
                     continue
 
-            return "[无法解码文件内容]"
+            return "[无法解码文件内容,请检查文件编码]"
 
         except Exception as e:
             logger.error(f"Failed to read file: {e}")
-            return None
+            return f"[读取文件失败: {e}]"
 
     def _display_preview_content(self, content: str):
         """
@@ -881,9 +964,6 @@ class MainWindow:
         Args:
             content: 文件内容
         """
-        # 启用编辑
-        self.preview_text.config(state=tk.NORMAL)
-
         # 清空现有内容
         self.preview_text.delete(1.0, tk.END)
 
@@ -921,9 +1001,6 @@ class MainWindow:
                 if pos:
                     self.preview_text.see(pos)
 
-        # 禁用编辑
-        self.preview_text.config(state=tk.DISABLED)
-
     def _show_preview_error(self, message: str):
         """
         在预览面板显示错误信息
@@ -931,17 +1008,61 @@ class MainWindow:
         Args:
             message: 错误信息
         """
-        self.preview_text.config(state=tk.NORMAL)
         self.preview_text.delete(1.0, tk.END)
         self.preview_text.insert(1.0, f"错误: {message}")
-        self.preview_text.config(state=tk.DISABLED)
 
     def _clear_preview(self):
         """清空预览面板"""
         self.preview_info_label.config(text="")
-        self.preview_text.config(state=tk.NORMAL)
         self.preview_text.delete(1.0, tk.END)
-        self.preview_text.config(state=tk.DISABLED)
+
+    def _handle_preview_copy(self):
+        """处理 Ctrl+C 复制快捷键"""
+        try:
+            # 获取选中的文本
+            selected_text = self.preview_text.get(tk.SEL_FIRST, tk.SEL_LAST)
+            if selected_text:
+                self.root.clipboard_clear()
+                self.root.clipboard_append(selected_text)
+                self.set_status(f"已复制 {len(selected_text)} 个字符")
+                return 'break'  # 阻止默认行为
+        except tk.TclError:
+            # 没有选中文本，不复制
+            pass
+        return 'break'
+
+    def _handle_preview_select_all(self):
+        """处理 Ctrl+A 全选快捷键"""
+        self.preview_text.tag_add(tk.SEL, "1.0", tk.END)
+        self.preview_text.mark_set(tk.INSERT, "1.0")
+        self.preview_text.see(tk.INSERT)
+        return 'break'  # 阻止默认行为
+
+    def _copy_preview_text(self):
+        """复制预览文本中选中的内容（右键菜单）"""
+        try:
+            # 获取选中的文本
+            selected_text = self.preview_text.get(tk.SEL_FIRST, tk.SEL_LAST)
+            if selected_text:
+                self.root.clipboard_clear()
+                self.root.clipboard_append(selected_text)
+                self.set_status(f"已复制 {len(selected_text)} 个字符")
+        except tk.TclError:
+            # 如果没有选中文本，复制全部内容
+            all_text = self.preview_text.get(1.0, tk.END)
+            self.root.clipboard_clear()
+            self.root.clipboard_append(all_text)
+            self.set_status("已复制全部预览内容")
+
+    def _select_all_preview(self):
+        """全选预览文本（右键菜单）"""
+        self.preview_text.tag_add(tk.SEL, "1.0", tk.END)
+        self.preview_text.mark_set(tk.INSERT, "1.0")
+        self.preview_text.see(tk.INSERT)
+
+    def _show_preview_context_menu(self, event):
+        """显示预览文本的右键菜单"""
+        self.preview_context_menu.post(event.x_root, event.y_root)
 
     # === 公共方法 ===
 
@@ -960,6 +1081,7 @@ class MainWindow:
             doc_id = result.get('id', 0)
             file_name = result.get('file_name', '')
             file_path = result.get('file_path', '')
+            library_name = result.get('library_name', '')  # 获取库名
             file_size = result.get('file_size', 0)
             modified_at = result.get('modified_at', '')
             similarity = result.get('similarity_score', result.get('score', ''))
@@ -970,12 +1092,12 @@ class MainWindow:
             # 格式化相似度
             similarity_str = f"{similarity:.2f}" if isinstance(similarity, (int, float)) else str(similarity)
 
-            # 插入结果,使用 tags 存储文档 ID
+            # 插入结果,使用 tags 存储文档 ID（添加库名列）
             item_id = self.results_tree.insert(
                 '',
                 'end',
                 text=str(i),
-                values=(file_name, file_path, size_str, modified_at, similarity_str),
+                values=(file_name, file_path, library_name, size_str, modified_at, similarity_str),
                 tags=(f'doc_id:{doc_id}',)
             )
 

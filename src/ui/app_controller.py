@@ -47,6 +47,10 @@ class AppController:
         self.recent_indexes_file = "recent_indexes.json"
         self.recent_indexes = self._load_recent_indexes()
 
+        # 索引库管理器
+        from src.core.index_library_manager import IndexLibraryManager
+        self.library_manager = IndexLibraryManager(config_file='indexes.json')
+
         logger.info("App controller initialized")
 
     def initialize_components(self):
@@ -76,11 +80,12 @@ class AppController:
         """初始化 UI"""
         from src.ui.main_window import MainWindow
 
-        self.main_window = MainWindow()
+        self.main_window = MainWindow(library_manager=self.library_manager)
 
         # 设置回调
         self.main_window.set_search_callback(self.handle_search)
         self.main_window.set_index_callback(self.handle_index)
+        self.main_window.set_update_index_callback(self.handle_update_index)  # 增量更新
         self.main_window.set_settings_callback(self.handle_settings)
         self.main_window.set_new_index_callback(self.handle_new_index)
         self.main_window.set_open_index_callback(self.handle_open_index)
@@ -96,7 +101,7 @@ class AppController:
 
     def handle_search(self, query: str, mode: str = "fts") -> List[Dict[str, Any]]:
         """
-        处理搜索请求
+        处理搜索请求（支持多库搜索）
 
         Args:
             query: 搜索查询
@@ -108,50 +113,93 @@ class AppController:
         logger.info(f"Handling search: query='{query}', mode='{mode}'")
 
         try:
-            if mode == "fts":
-                # 全文搜索
-                response = self.search_engine.search(query, limit=100)
-                # SearchResponse.results 包含 SearchResult 列表
-                return [self._search_result_to_dict(r) for r in response.results]
+            # 获取启用的索引库
+            enabled_libraries = self.library_manager.get_enabled_libraries()
 
-            elif mode == "semantic":
-                # 语义搜索
-                if not self.semantic_search:
-                    logger.warning("Semantic search not initialized")
-                    return []
-
-                results = self.semantic_search.search(query, top_k=100)
-                return [r.to_dict() for r in results]
-
-            elif mode == "hybrid":
-                # 混合搜索
-                response = self.search_engine.search(query, limit=50)
-                fts_dicts = [self._search_result_to_dict(r) for r in response.results]
-
-                if self.semantic_search:
-                    semantic_results = self.semantic_search.search(query, top_k=50)
-
-                    from src.ai.semantic_search import combine_search_results
-                    combined = combine_search_results(
-                        fts_dicts,
-                        semantic_results,
-                        keyword_weight=0.5,
-                        semantic_weight=0.5,
-                        top_k=100
-                    )
-                    return combined
-                else:
-                    return fts_dicts
-
-            else:
-                logger.error(f"Unknown search mode: {mode}")
+            if not enabled_libraries:
+                logger.warning("No enabled libraries for search")
                 return []
+
+            all_results = []
+
+            # 对每个启用的库进行搜索
+            for library in enabled_libraries:
+                try:
+                    # 为每个库创建独立的数据库连接和搜索引擎
+                    from src.data.db_manager import DBManager
+                    from src.core.search_engine import SearchEngine
+
+                    db_manager = DBManager(library.db_path)
+                    search_engine = SearchEngine(db_manager=db_manager)
+
+                    if mode == "fts":
+                        # 全文搜索
+                        response = search_engine.search(query, limit=100)
+                        library_results = [
+                            self._search_result_to_dict(r, library.name)
+                            for r in response.results
+                        ]
+                        all_results.extend(library_results)
+
+                    elif mode == "semantic":
+                        # 语义搜索（暂不支持多库）
+                        if library.db_path == self.db_path and self.semantic_search:
+                            results = self.semantic_search.search(query, top_k=100)
+                            library_results = [r.to_dict() for r in results]
+                            # 添加库名
+                            for r in library_results:
+                                r['library_name'] = library.name
+                            all_results.extend(library_results)
+
+                    elif mode == "hybrid":
+                        # 混合搜索
+                        response = search_engine.search(query, limit=50)
+                        library_results = [
+                            self._search_result_to_dict(r, library.name)
+                            for r in response.results
+                        ]
+                        all_results.extend(library_results)
+
+                    # 关闭数据库连接
+                    db_manager.close()
+
+                    # 更新库的统计信息（最后使用时间）
+                    self.library_manager.update_library_stats(
+                        library.name,
+                        doc_count=library.doc_count,
+                        size_bytes=library.size_bytes
+                    )
+
+                except Exception as e:
+                    logger.error(f"Search failed for library '{library.name}': {e}")
+                    continue
+
+            # 按分数排序所有结果
+            all_results.sort(key=lambda x: x.get('score', 0), reverse=True)
+
+            # 去重（基于文件路径，规范化路径格式）
+            import os
+            seen_paths = set()
+            unique_results = []
+            for result in all_results:
+                file_path = result.get('file_path', '')
+                if file_path:
+                    # 规范化路径（统一斜杠方向，解析 . 和 ..）
+                    normalized_path = os.path.normpath(file_path).lower()
+                    if normalized_path not in seen_paths:
+                        seen_paths.add(normalized_path)
+                        unique_results.append(result)
+
+            logger.info(f"Search returned {len(all_results)} results, {len(unique_results)} unique")
+
+            # 返回前 100 条结果
+            return unique_results[:100]
 
         except Exception as e:
             logger.error(f"Search failed: {e}")
             raise
 
-    def _search_result_to_dict(self, result) -> Dict[str, Any]:
+    def _search_result_to_dict(self, result, library_name: str = "") -> Dict[str, Any]:
         """将 SearchResult 转换为字典"""
         return {
             'id': result.id,
@@ -162,7 +210,8 @@ class AppController:
             'similarity_score': abs(result.rank),
             'file_size': result.metadata.get('file_size', 0),
             'file_type': result.metadata.get('file_type', ''),
-            'modified_at': result.metadata.get('modified_at', '')
+            'modified_at': result.metadata.get('modified_at', ''),
+            'library_name': library_name  # 添加库名
         }
 
     def handle_index(self, directory: str):
@@ -238,6 +287,11 @@ class AppController:
         Args:
             stats: 索引统计信息
         """
+        # 清除搜索缓存（因为索引已更新，旧的搜索结果可能已过期）
+        if self.search_engine:
+            self.search_engine.clear_cache()
+            logger.info("搜索缓存已清除（索引更新后）")
+
         self.main_window.set_status(
             f"索引完成! 总计: {stats.total_files} 个文件, "
             f"成功: {stats.indexed_files}, 失败: {stats.failed_files}, "
@@ -256,6 +310,111 @@ class AppController:
         messagebox.showerror("错误", f"索引失败: {error_msg}")
         self.main_window.set_status("索引失败")
         self.main_window.update_progress_bar(0)  # 隐藏进度条
+
+    def handle_update_index(self):
+        """
+        处理增量更新索引请求（在后台线程中执行）
+
+        检测文件变化并更新索引
+        """
+        logger.info("Handling update index request")
+
+        self.main_window.set_status("准备更新索引...")
+
+        def update_worker():
+            """后台增量更新工作线程"""
+            try:
+                # 定义进度回调
+                def progress_callback(current: int, total: int, current_file: str):
+                    """更新进度条和状态"""
+                    if total > 0:
+                        percentage = int((current / total) * 100)
+                        file_name = current_file.split('\\')[-1] if current_file else ""
+
+                        # 在主线程中更新 GUI
+                        self.main_window.root.after(0, lambda: self._update_progress(
+                            current, total, percentage, f"检查: {file_name}"
+                        ))
+
+                # 获取数据库中所有已索引的文件路径
+                cursor = self.db_manager.connection.cursor()
+                cursor.execute("""
+                    SELECT DISTINCT file_path
+                    FROM documents
+                    WHERE status = 'active'
+                """)
+
+                rows = cursor.fetchall()
+
+                if not rows:
+                    # 没有已索引的文件
+                    def show_no_files():
+                        from tkinter import messagebox
+                        messagebox.showinfo(
+                            "提示",
+                            "当前索引库中没有文件。\n请先使用 '添加目录' 功能进行索引。"
+                        )
+                        self.main_window.set_status("索引库为空")
+                        self.main_window.update_progress_bar(0)
+
+                    self.main_window.root.after(0, show_no_files)
+                    return
+
+                # 提取所有唯一的根目录
+                import os
+                unique_dirs = set()
+                for row in rows:
+                    file_path = row['file_path']
+                    # 提取文件所在目录
+                    dir_path = os.path.dirname(file_path)
+                    # 尝试找到更高层的目录（简单方法：使用前几层）
+                    parts = dir_path.split(os.sep)
+                    if len(parts) > 3:
+                        # 使用前3层作为根目录（例如 E:\索引测试\2025年警示教育）
+                        root_dir = os.sep.join(parts[:4])
+                    else:
+                        root_dir = dir_path
+                    unique_dirs.add(root_dir)
+
+                # 将目录集合转换为列表
+                paths_to_refresh = list(unique_dirs)
+
+                logger.info(f"发现 {len(paths_to_refresh)} 个目录需要刷新: {paths_to_refresh}")
+
+                # 使用 refresh_index 对所有文件进行检查
+                stats = self.index_manager.refresh_index(
+                    paths=paths_to_refresh,
+                    progress_callback=progress_callback
+                )
+
+                logger.info(f"Index update completed: {stats}")
+
+                # 在主线程中显示完成统计
+                def finish_update():
+                    self.main_window.set_status(
+                        f"更新完成! "
+                        f"新增: {stats.added_files}, "
+                        f"更新: {stats.updated_files}, "
+                        f"删除: {stats.deleted_files}, "
+                        f"耗时: {stats.elapsed_time:.2f}秒"
+                    )
+                    self.main_window.update_progress_bar(0)
+
+                    # 清除搜索缓存
+                    if self.search_engine:
+                        self.search_engine.clear_cache()
+                        logger.info("搜索缓存已清除（增量更新后）")
+
+                self.main_window.root.after(0, finish_update)
+
+            except Exception as e:
+                logger.error(f"Index update failed: {e}")
+                # 在主线程中显示错误
+                self.main_window.root.after(0, lambda: self._indexing_error(str(e)))
+
+        # 启动后台线程
+        thread = threading.Thread(target=update_worker, daemon=True)
+        thread.start()
 
     def handle_settings(self):
         """

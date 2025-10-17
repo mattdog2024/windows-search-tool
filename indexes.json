@@ -1,0 +1,16 @@
+{
+  "version": "1.0",
+  "default_library": "默认索引库",
+  "libraries": [
+    {
+      "name": "默认索引库",
+      "db_path": "search_index.db",
+      "created": "2025-10-17T14:45:48.824924",
+      "last_used": "2025-10-17T15:00:06.910025",
+      "doc_count": 0,
+      "size_bytes": 0,
+      "enabled": true,
+      "color": "#4CAF50"
+    }
+  ]
+}
