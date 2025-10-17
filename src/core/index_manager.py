@@ -14,7 +14,6 @@ from dataclasses import dataclass, field
 from multiprocessing import Pool, cpu_count
 
 from ..data.db_manager import DBManager
-from ..parsers.factory import ParserFactory
 from ..utils.config import ConfigManager
 
 logger = logging.getLogger(__name__)
