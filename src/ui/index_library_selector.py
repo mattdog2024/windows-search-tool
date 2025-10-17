@@ -64,8 +64,8 @@ class IndexLibrarySelector(ttk.Frame):
         """显示索引库选择对话框"""
         dialog = tk.Toplevel(self)
         dialog.title("选择索引库")
-        dialog.geometry("500x400")
-        dialog.transient(self.master)
+        dialog.geometry("520x450")  # 增加高度以显示按钮
+        # dialog.transient(self.master)  # 移除这行以允许窗口拖动
         dialog.grab_set()
 
         # 顶部说明
@@ -78,24 +78,40 @@ class IndexLibrarySelector(ttk.Frame):
             font=("", 10, "bold")
         ).pack(anchor=tk.W)
 
-        # 全选/全不选
+        # 全选/全不选（加粗显示，与索引库列表区分）
         select_all_frame = ttk.Frame(dialog)
         select_all_frame.pack(fill=tk.X, padx=10, pady=5)
 
         self.select_all_var = tk.BooleanVar(value=self._is_all_enabled())
 
-        ttk.Checkbutton(
+        select_all_cb = ttk.Checkbutton(
             select_all_frame,
-            text="全部索引库",
+            text="☑ 全选/全不选",
             variable=self.select_all_var,
             command=self._toggle_all
-        ).pack(side=tk.LEFT)
+        )
+        select_all_cb.pack(side=tk.LEFT)
 
-        ttk.Separator(dialog, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=10)
+        # 添加说明
+        ttk.Label(
+            select_all_frame,
+            text="（勾选此项将选中/取消所有索引库）",
+            foreground="gray",
+            font=("", 8)
+        ).pack(side=tk.LEFT, padx=(10, 0))
 
-        # 索引库列表（带滚动条）
+        ttk.Separator(dialog, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=10, pady=5)
+
+        # 索引库列表标题
+        ttk.Label(
+            dialog,
+            text="可用的索引库：",
+            font=("", 9)
+        ).pack(anchor=tk.W, padx=15, pady=(5, 0))
+
+        # 索引库列表（带滚动条）- 限制高度，不占满所有空间
         list_frame = ttk.Frame(dialog)
-        list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(5, 5))
 
         # 创建 Canvas 和 Scrollbar 用于滚动
         canvas = tk.Canvas(list_frame)
@@ -154,20 +170,20 @@ class IndexLibrarySelector(ttk.Frame):
                 font=("", 8)
             ).pack(anchor=tk.W)
 
-        # 底部按钮
+        # 底部按钮（使用 pack 的 side=BOTTOM 确保始终可见）
         btn_frame = ttk.Frame(dialog)
-        btn_frame.pack(fill=tk.X, padx=10, pady=10)
-
-        ttk.Button(
-            btn_frame,
-            text="确定",
-            command=lambda: self._apply_selection(dialog)
-        ).pack(side=tk.RIGHT, padx=2)
+        btn_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=10)
 
         ttk.Button(
             btn_frame,
             text="取消",
             command=dialog.destroy
+        ).pack(side=tk.RIGHT, padx=2)
+
+        ttk.Button(
+            btn_frame,
+            text="确定",
+            command=lambda: self._apply_selection(dialog)
         ).pack(side=tk.RIGHT, padx=2)
 
     def _is_all_enabled(self) -> bool:
@@ -224,7 +240,7 @@ class IndexLibrarySelector(ttk.Frame):
         dialog = tk.Toplevel(self)
         dialog.title("索引库管理")
         dialog.geometry("600x450")
-        dialog.transient(self.master)
+        # dialog.transient(self.master)  # 移除这行以允许窗口拖动
         dialog.grab_set()
 
         # 顶部说明
@@ -313,12 +329,72 @@ class IndexLibrarySelector(ttk.Frame):
 
     def _add_library_dialog(self, parent, tree):
         """添加索引库对话框"""
-        messagebox.showinfo(
-            "提示",
-            "添加索引库功能将在后续版本实现。\n\n"
-            "当前您可以通过 '新建索引' 功能创建新的索引库。",
+        from tkinter import filedialog
+        import tkinter.simpledialog as simpledialog
+        import os
+
+        # 选择数据库文件
+        db_file = filedialog.askopenfilename(
+            title="选择索引库数据库文件",
+            filetypes=[
+                ("SQLite 数据库", "*.db"),
+                ("所有文件", "*.*")
+            ],
             parent=parent
         )
+
+        if not db_file:
+            return
+
+        # 简化对话框：只询问库名
+        library_name = simpledialog.askstring(
+            "输入索引库名称",
+            "请为这个索引库输入一个名称：",
+            initialvalue=os.path.basename(db_file).replace('.db', ''),
+            parent=parent
+        )
+
+        if not library_name:
+            return
+
+        # 添加到管理器
+        try:
+            self.library_manager.add_library(
+                name=library_name,
+                db_path=db_file,
+                set_as_default=False
+            )
+
+            # 刷新 Treeview
+            size_mb = 0  # 暂时显示为 0
+            tree.insert('', tk.END, values=(
+                library_name,
+                0,  # doc_count
+                f"{size_mb:.1f} MB",
+                db_file
+            ))
+
+            # 更新按钮文本
+            self.selector_button.config(text=self._get_selection_text())
+
+            messagebox.showinfo(
+                "成功",
+                f"索引库 '{library_name}' 已添加！\n\n"
+                f"数据库文件: {db_file}\n\n"
+                f"请关闭并重新打开索引库选择对话框以查看新库。",
+                parent=parent
+            )
+
+            logger.info(f"成功添加索引库: {library_name} -> {db_file}")
+
+            # 关闭管理对话框，提示用户重新打开选择对话框
+            parent.destroy()
+        except Exception as e:
+            messagebox.showerror(
+                "错误",
+                f"添加索引库失败: {e}",
+                parent=parent
+            )
 
     def _delete_selected_library(self, tree):
         """删除选中的索引库"""
