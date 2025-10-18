@@ -5,6 +5,7 @@ Windows Search Tool - 主程序入口
 """
 
 import sys
+import multiprocessing
 from pathlib import Path
 
 # 添加项目根目录到 Python 路径
@@ -68,4 +69,8 @@ def main():
 
 
 if __name__ == '__main__':
+    # Windows 下 multiprocessing 需要 freeze_support
+    # 防止打包后的可执行文件无限创建进程
+    multiprocessing.freeze_support()
+
     sys.exit(main())
