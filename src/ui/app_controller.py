@@ -240,14 +240,14 @@ class AppController:
         """
         logger.info(f"Handling index request for: {directory}")
 
-        # 获取启用的索引库
-        enabled_libraries = self.library_manager.get_enabled_libraries()
+        # 获取所有索引库（不只是启用的）
+        all_libraries = self.library_manager.get_all_libraries()
 
-        if not enabled_libraries:
+        if not all_libraries:
             from tkinter import messagebox
             messagebox.showwarning(
                 "警告",
-                "没有启用的索引库。\n请先在索引库选择中启用至少一个库。"
+                "没有可用的索引库。\n请先创建至少一个索引库。"
             )
             return
 
@@ -256,7 +256,7 @@ class AppController:
 
         target_library = show_library_selection_dialog(
             self.main_window.root,
-            enabled_libraries,
+            all_libraries,
             title="选择目标索引库"
         )
 
