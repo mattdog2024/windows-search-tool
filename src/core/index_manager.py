@@ -57,22 +57,35 @@ class IndexManager:
     索引管理器
 
     负责文件扫描、内容提取、索引创建和增量更新
-    采用单例模式防止多实例冲突
+    采用多实例缓存模式,为每个数据库路径创建独立实例
     """
 
-    _instance = None
+    _instances = {}  # 字典缓存: {db_path: instance}
 
     def __new__(cls, db_path: Optional[str] = None):
         """
-        单例模式实现
+        多实例缓存实现
 
         Args:
             db_path: 数据库文件路径
         """
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._initialized = False
-        return cls._instance
+        # 确定数据库路径
+        if db_path is None:
+            # 使用默认数据库路径
+            appdata = os.getenv('APPDATA', '')
+            db_path = os.path.join(appdata, 'WindowsSearchTool', 'index.db')
+
+        # 规范化路径(避免相对路径导致的重复实例)
+        db_path = os.path.abspath(db_path)
+
+        # 检查是否已有此数据库的实例
+        if db_path not in cls._instances:
+            instance = super().__new__(cls)
+            instance._initialized = False
+            instance._db_path = db_path
+            cls._instances[db_path] = instance
+
+        return cls._instances[db_path]
 
     def __init__(self, db_path: Optional[str] = None):
         """
@@ -88,13 +101,8 @@ class IndexManager:
         # 初始化配置管理器
         self.config = ConfigManager()
 
-        # 初始化数据库管理器
-        if db_path is None:
-            # 使用默认数据库路径
-            appdata = os.getenv('APPDATA', '')
-            db_path = os.path.join(appdata, 'WindowsSearchTool', 'index.db')
-
-        self.db = DBManager(db_path)
+        # 初始化数据库管理器(使用 __new__ 中确定的路径)
+        self.db = DBManager(self._db_path)
 
         # 初始化解析器工厂(使用全局工厂实例)
         from ..parsers.factory import get_parser_factory
@@ -154,7 +162,7 @@ class IndexManager:
         self.parallel_workers = self.config.get('indexing.parallel_workers', cpu_count())
 
         self._initialized = True
-        logger.info(f"IndexManager 初始化完成, 数据库路径: {db_path}")
+        logger.info(f"IndexManager 初始化完成, 数据库路径: {self._db_path}")
 
     # ==================== 文件扫描功能 ====================
 
@@ -578,7 +586,7 @@ class IndexManager:
 
         except Exception as e:
             logger.error(f"批量插入失败: {e}")
-            # 如果批量插入失败,尝试逐个插入
+            # 如果批量插入失败,尝试逐个插入或更新
             success_count = 0
             for doc in documents:
                 try:
@@ -595,9 +603,30 @@ class IndexManager:
                     )
                     success_count += 1
                 except Exception as e2:
-                    logger.error(f"插入单个文档失败: {doc['file_path']}, 错误: {e2}")
+                    # 检查是否是 UNIQUE constraint 错误
+                    if 'UNIQUE constraint failed' in str(e2):
+                        # 文件已存在,尝试更新
+                        try:
+                            existing_doc = self.db.get_document_by_path(doc['file_path'])
+                            if existing_doc:
+                                self.db.update_document(
+                                    document_id=existing_doc['id'],
+                                    content=doc['content'],
+                                    file_size=doc.get('file_size'),
+                                    file_type=doc.get('file_type'),
+                                    content_hash=doc.get('content_hash'),
+                                    modified_at=doc.get('modified_at'),
+                                    status='active',
+                                    metadata=doc.get('metadata')
+                                )
+                                success_count += 1
+                                logger.info(f"文档已存在,更新成功: {doc['file_path']}")
+                        except Exception as e3:
+                            logger.error(f"更新文档失败: {doc['file_path']}, 错误: {e3}")
+                    else:
+                        logger.error(f"插入单个文档失败: {doc['file_path']}, 错误: {e2}")
 
-            logger.info(f"逐个插入完成: {success_count}/{len(documents)} 个文档")
+            logger.info(f"逐个插入/更新完成: {success_count}/{len(documents)} 个文档")
             return success_count
 
     # ==================== 多进程并行处理功能 ====================
@@ -974,16 +1003,16 @@ def _add_incremental_methods_to_index_manager():
 
                 logger.info(f"修改文件更新完成: {stats.updated_files} 个")
 
-            # 6. 删除已删除文件的索引
+            # 6. 标记已删除文件的索引(软删除,保留内容)
             if deleted_file_paths:
-                logger.info(f"开始删除 {len(deleted_file_paths)} 个已删除文件的索引")
+                logger.info(f"开始标记 {len(deleted_file_paths)} 个已删除文件")
 
                 for file_path in deleted_file_paths:
-                    success = self.db.delete_document_by_path(file_path, hard_delete=True)
+                    success = self.db.delete_document_by_path(file_path, hard_delete=False)
                     if success:
                         stats.deleted_files += 1
 
-                logger.info(f"删除文件索引完成: {stats.deleted_files} 个")
+                logger.info(f"标记删除文件完成: {stats.deleted_files} 个")
 
             # 7. 更新统计信息
             stats.indexed_files = stats.added_files + stats.updated_files
