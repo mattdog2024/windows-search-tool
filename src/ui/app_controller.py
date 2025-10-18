@@ -678,6 +678,19 @@ class AppController:
             if result:
                 index_name, db_path, indexed_dirs = result
 
+                # ✅ 添加到索引库管理器（保存到 indexes.json）
+                try:
+                    library = self.library_manager.add_library(
+                        name=index_name,
+                        db_path=db_path,
+                        set_as_default=False
+                    )
+                    logger.info(f"索引库已添加到管理器: {index_name}")
+                except ValueError as ve:
+                    # 如果库已存在,获取现有库
+                    logger.warning(f"索引库已存在: {ve}")
+                    library = self.library_manager.get_library(index_name)
+
                 # 切换到新的索引
                 self._switch_index(index_name, db_path)
 
@@ -690,6 +703,9 @@ class AppController:
 
                 # 添加到最近索引
                 self._add_to_recent_indexes(index_name, db_path)
+
+                # 更新窗口标题
+                self._update_window_title()
 
         except Exception as e:
             logger.error(f"Failed to create new index: {e}")
