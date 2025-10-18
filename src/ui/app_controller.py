@@ -229,6 +229,77 @@ class AppController:
             'library_name': library_name  # 添加库名
         }
 
+    def _index_to_library(self, directory: str, target_library):
+        """
+        直接索引目录到指定的索引库（不弹出选择对话框）
+
+        Args:
+            directory: 要索引的目录
+            target_library: 目标索引库对象
+        """
+        logger.info(f"直接索引 {directory} 到索引库: {target_library.name}")
+
+        # 禁用索引按钮，防止重复索引
+        self.main_window.set_status(f"准备索引到 '{target_library.name}'...")
+
+        def index_worker():
+            """后台索引工作线程"""
+            try:
+                # 为目标库创建 IndexManager
+                from src.core.index_manager import IndexManager
+                library_index_manager = IndexManager(db_path=target_library.db_path)
+
+                # 定义进度回调（使用 after 方法在主线程更新 GUI）
+                def progress_callback(current: int, total: int, current_file: str):
+                    """更新进度条和状态"""
+                    if total > 0:
+                        percentage = int((current / total) * 100)
+                        file_name = current_file.split('\\')[-1] if current_file else ""
+
+                        # 在主线程中更新 GUI
+                        self.main_window.root.after(0, lambda: self._update_progress(
+                            current, total, percentage, f"[{target_library.name}] {file_name}"
+                        ))
+
+                # 执行索引 (使用 create_index_parallel 方法)
+                stats = library_index_manager.create_index_parallel(
+                    paths=[directory],
+                    num_workers=4,
+                    progress_callback=progress_callback
+                )
+
+                logger.info(f"Indexing completed for '{target_library.name}': {stats}")
+
+                # 在主线程中显示完成统计
+                def finish():
+                    self._finish_indexing(stats)
+
+                    # 查询数据库中的实际文件总数并更新统计
+                    from src.data.db_manager import DBManager
+                    temp_db = DBManager(target_library.db_path)
+                    cursor = temp_db.connection.cursor()
+                    cursor.execute("SELECT COUNT(*) FROM documents")
+                    actual_count = cursor.fetchone()[0]
+                    temp_db.close()
+
+                    # 更新库的统计信息（使用实际的总数）
+                    self.library_manager.update_library_stats(
+                        target_library.name,
+                        doc_count=actual_count,
+                        size_bytes=0  # TODO: 计算实际大小
+                    )
+
+                self.main_window.root.after(0, finish)
+
+            except Exception as e:
+                logger.error(f"Indexing failed: {e}")
+                # 在主线程中显示错误
+                self.main_window.root.after(0, lambda: self._indexing_error(str(e)))
+
+        # 启动后台线程
+        thread = threading.Thread(target=index_worker, daemon=True)
+        thread.start()
+
     def handle_index(self, directory: str):
         """
         处理索引请求（在后台线程中执行）
@@ -696,8 +767,9 @@ class AppController:
 
                 # 如果选择了立刻索引
                 if indexed_dirs:
+                    # 直接索引到新创建的库,不再弹出选择对话框
                     for directory in indexed_dirs:
-                        self.handle_index(directory)
+                        self._index_to_library(directory, library)
                 else:
                     self.main_window.set_status(f"索引 '{index_name}' 创建成功,可以开始添加目录")
 
