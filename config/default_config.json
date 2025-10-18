@@ -1,0 +1,37 @@
+{
+  "indexing": {
+    "max_file_size_mb": 100,
+    "excluded_extensions": [
+      ".exe",
+      ".dll",
+      ".so",
+      ".dylib",
+      ".bin",
+      ".tmp"
+    ],
+    "excluded_paths": [
+      "$RECYCLE.BIN",
+      "System Volume Information",
+      "node_modules",
+      "__pycache__",
+      ".git"
+    ],
+    "batch_size": 100,
+    "parallel_workers": 4
+  },
+  "search": {
+    "default_mode": "fuzzy",
+    "max_results": 100,
+    "snippet_length": 200
+  },
+  "ui": {
+    "language": "zh_CN",
+    "theme": "default",
+    "font_size": 10
+  },
+  "ocr": {
+    "enabled": true,
+    "language": "chi_sim",
+    "confidence_threshold": 60
+  }
+}
